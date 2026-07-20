@@ -26,7 +26,9 @@ public partial class MainWindow : Window
     private readonly CalDAVService _sync;
     private readonly TaskManager _mgr;
     private readonly System.Windows.Forms.NotifyIcon _tray;
+    private readonly System.Windows.Data.ListCollectionView _taskView;
     private bool _pinned = true;
+    private bool _showCompleted;
 
     private static readonly Dictionary<string, (string card, string title)> Themes = new()
     {
@@ -53,7 +55,11 @@ public partial class MainWindow : Window
         _cfg = ConfigManager.Load();
         _sync = new CalDAVService(_cfg.NextcloudUrl, _cfg.Username, _cfg.AppPassword);
         _mgr = new TaskManager(_sync);
-        TaskList.ItemsSource = _mgr.Tasks;
+
+        // 过滤：默认只显示未完成
+        _taskView = new System.Windows.Data.ListCollectionView(_mgr.Tasks);
+        _taskView.Filter = o => _showCompleted || o is TaskData t && !t.Completed;
+        TaskList.ItemsSource = _taskView;
 
         Width = _cfg.CardWidth;
         Height = _cfg.CardHeight;
@@ -151,6 +157,14 @@ public partial class MainWindow : Window
         PinBtn.ToolTip = _pinned ? "已置顶 — 点击取消" : "未置顶 — 点击置顶";
     }
 
+    private void FilterBtn_Click(object s, RoutedEventArgs e)
+    {
+        _showCompleted = !_showCompleted;
+        FilterBtn.Content = _showCompleted ? "☑" : "☐";
+        FilterBtn.ToolTip = _showCompleted ? "隐藏已完成" : "显示已完成";
+        _taskView.Refresh();
+    }
+
     private void SettingsBtn_Click(object s, RoutedEventArgs e)
     {
         var dlg = new SettingsDialog(_cfg) { Owner = this };
@@ -212,7 +226,10 @@ public partial class MainWindow : Window
     private async void TaskCheckChanged(object s, RoutedEventArgs e)
     {
         if (s is CheckBox cb && cb.DataContext is TaskData task)
+        {
             await _mgr.ToggleCompleteAsync(task);
+            _taskView.Refresh();
+        }
     }
 
     private async void EditBtn_Click(object s, RoutedEventArgs e)
