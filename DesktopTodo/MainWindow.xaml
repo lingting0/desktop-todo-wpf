@@ -45,15 +45,19 @@
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="PinBtn_Click" ToolTip="已置顶 — 点击取消"/>
-                <Button Content="⚙" Grid.Column="2"
+                <Button x:Name="FilterBtn" Content="☐" Grid.Column="2"
+                        Width="28" Height="24" Margin="0,0,4,0"
+                        Foreground="#888" Background="Transparent" BorderThickness="0"
+                        Click="FilterBtn_Click" ToolTip="显示已完成"/>
+                <Button Content="⚙" Grid.Column="3"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="SettingsBtn_Click" ToolTip="设置"/>
-                <Button Content="─" Grid.Column="3"
+                <Button Content="─" Grid.Column="4"
                         Width="28" Height="24"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="MinBtn_Click" ToolTip="最小化到托盘"/>
-                <Button Content="×" Grid.Column="4"
+                <Button Content="×" Grid.Column="5"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="CloseBtn_Click" ToolTip="退出"/>
