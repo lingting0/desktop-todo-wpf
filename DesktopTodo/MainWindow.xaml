@@ -1,0 +1,127 @@
+<Window x:Class="DesktopTodo.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:DesktopTodo"
+        WindowStyle="None" AllowsTransparency="True" Topmost="True"
+        ResizeMode="CanResizeWithGrip" Background="Transparent"
+        Width="380" Height="500" MinWidth="260" MinHeight="200"
+        Left="50" Top="50"
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0" ResizeBorderThickness="6"
+                      GlassFrameThickness="0" CornerRadius="12"
+                      NonClientFrameEdges="None" UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <local:PrioToColorConverter x:Key="PrioToColor"/>
+    </Window.Resources>
+
+    <Border x:Name="CardBorder" CornerRadius="12" BorderThickness="1"
+            Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource BorderColor}">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="36"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Title Bar -->
+            <Grid Grid.Row="0" Background="{DynamicResource TitleBg}" MouseLeftButtonDown="TitleBar_Drag">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="TitleLabel" Text="📋 待办事项" Foreground="White"
+                           FontSize="14" FontWeight="Bold" VerticalAlignment="Center"
+                           Margin="12,0,0,0" Grid.Column="0"
+                           MouseRightButtonUp="TitleLabel_RightClick"/>
+                <Button x:Name="PinBtn" Content="◆" Grid.Column="1"
+                        Width="28" Height="24" Margin="0,0,4,0"
+                        Foreground="#888" Background="Transparent" BorderThickness="0"
+                        Click="PinBtn_Click" ToolTip="已置顶 — 点击取消"/>
+                <Button Content="⚙" Grid.Column="2"
+                        Width="28" Height="24" Margin="0,0,4,0"
+                        Foreground="#888" Background="Transparent" BorderThickness="0"
+                        Click="SettingsBtn_Click" ToolTip="设置"/>
+                <Button Content="─" Grid.Column="3"
+                        Width="28" Height="24"
+                        Foreground="#888" Background="Transparent" BorderThickness="0"
+                        Click="MinBtn_Click" ToolTip="最小化到托盘"/>
+                <Button Content="×" Grid.Column="4"
+                        Width="28" Height="24" Margin="0,0,4,0"
+                        Foreground="#888" Background="Transparent" BorderThickness="0"
+                        Click="CloseBtn_Click" ToolTip="退出"/>
+            </Grid>
+
+            <!-- Task List -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Background="Transparent">
+                <ItemsControl x:Name="TaskList" Margin="4">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="#33FFFFFF" BorderThickness="0,0,0,1"
+                                    Padding="8,4" Background="Transparent"
+                                    MouseRightButtonUp="TaskRow_RightClick">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Ellipse Grid.Column="0" Width="10" Height="10"
+                                             VerticalAlignment="Center" Margin="0,0,6,0"
+                                             Fill="{Binding Priority, Converter={StaticResource PrioToColor}}"/>
+                                    <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                                              IsChecked="{Binding Completed}"
+                                              Content="{Binding Summary}"
+                                              Foreground="{DynamicResource TextColor}"
+                                              Checked="TaskCheckChanged"
+                                              Unchecked="TaskCheckChanged"/>
+                                    <Button Grid.Column="2" Content="✎"
+                                            Width="24" Height="22" Margin="2,0"
+                                            Foreground="#888" Background="Transparent" BorderThickness="0"
+                                            Click="EditBtn_Click" ToolTip="编辑"/>
+                                    <Button Grid.Column="3" Content="×"
+                                            Width="24" Height="22"
+                                            Foreground="#888" Background="Transparent" BorderThickness="0"
+                                            Click="DelBtn_Click" ToolTip="删除"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- Input Row -->
+            <Border Grid.Row="2" Background="#22000000">
+                <Grid Margin="8,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="InputBox" Grid.Column="0"
+                             Padding="8,5" Background="{DynamicResource InputBg}"
+                             Foreground="{DynamicResource TextColor}"
+                             BorderBrush="{DynamicResource BorderColor}"
+                             BorderThickness="1"
+                             KeyDown="InputBox_KeyDown"/>
+                    <Button Grid.Column="1" Content="+" Width="40" Height="30"
+                            Margin="6,0,0,0"
+                            Background="#3320a0e0" Foreground="White"
+                            FontSize="18" FontWeight="Bold" BorderThickness="0"
+                            Click="AddBtn_Click"/>
+                </Grid>
+            </Border>
+
+            <!-- Status Bar -->
+            <TextBlock x:Name="StatusLabel" Grid.Row="3"
+                       Foreground="#888" FontSize="11" Padding="10,4"
+                       TextWrapping="Wrap"/>
+        </Grid>
+    </Border>
+</Window>

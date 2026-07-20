@@ -1,0 +1,14 @@
+{
+    "nextcloud_url": "https://your-server.example.com/remote.php/dav/",
+    "username": "你的用户名",
+    "app_password": "你的应用密码（NC设置-安全-设备与会话生成）",
+    "calendar_name": "待办事项",
+    "sync_interval_seconds": 300,
+    "card_width": 380,
+    "card_height": 500,
+    "card_position_x": 50,
+    "card_position_y": 50,
+    "snap_distance": 15,
+    "theme": "暗黑",
+    "auto_start": false
+}
