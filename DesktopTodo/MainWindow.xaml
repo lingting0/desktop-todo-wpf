@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:DesktopTodo"
         WindowStyle="None" AllowsTransparency="True" Topmost="True"
+        ShowInTaskbar="False"
         ResizeMode="CanResizeWithGrip" Background="Transparent"
         Width="380" Height="500" MinWidth="260" MinHeight="200"
         Left="50" Top="50"
