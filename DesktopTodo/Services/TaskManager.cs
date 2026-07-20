@@ -50,7 +50,7 @@ public class TaskManager
 
     public async Task ToggleCompleteAsync(TaskData task)
     {
-        task.Completed = !task.Completed;
+        // binding 已设置 Completed，这里只补时间戳和同步
         task.CompletedAt = task.Completed ? DateTime.Now : null;
         await UpdateAsync(task);
     }
