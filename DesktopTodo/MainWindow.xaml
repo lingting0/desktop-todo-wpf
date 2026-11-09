@@ -6,8 +6,7 @@
         ShowInTaskbar="False"
         ResizeMode="CanResizeWithGrip" Background="Transparent"
         Width="380" Height="500" MinWidth="260" MinHeight="200"
-        Left="50" Top="50"
-        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+        Left="50" Top="50">
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="0" ResizeBorderThickness="6"
                       GlassFrameThickness="0" CornerRadius="12"
@@ -28,10 +27,11 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Title Bar -->
+            <!-- Title Bar：6 列，与 6 个标题栏元素一一对应 -->
             <Grid Grid.Row="0" Background="{DynamicResource TitleBg}" MouseLeftButtonDown="TitleBar_Drag">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
@@ -81,12 +81,12 @@
                                     <Ellipse Grid.Column="0" Width="10" Height="10"
                                              VerticalAlignment="Center" Margin="0,0,6,0"
                                              Fill="{Binding Priority, Converter={StaticResource PrioToColor}}"/>
+                                    <!-- 用 Click 而非 Checked/Unchecked：绑定初始化时不会反向写回服务器 -->
                                     <CheckBox Grid.Column="1" VerticalAlignment="Center"
                                               IsChecked="{Binding Completed}"
                                               Content="{Binding Summary}"
                                               Foreground="{DynamicResource TextColor}"
-                                              Checked="TaskCheckChanged"
-                                              Unchecked="TaskCheckChanged"/>
+                                              Click="TaskCheckChanged"/>
                                     <Button Grid.Column="2" Content="✎"
                                             Width="24" Height="22" Margin="2,0"
                                             Foreground="#888" Background="Transparent" BorderThickness="0"

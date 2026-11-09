@@ -1,6 +1,6 @@
 using System;
+using System.IO;
 using System.Windows;
-using System.Windows.Threading;
 
 namespace DesktopTodo;
 
@@ -10,14 +10,15 @@ public partial class App : Application
     {
         DispatcherUnhandledException += (_, e) =>
         {
-            MessageBox.Show($"错误: {e.Exception.Message}\n\n{e.Exception.StackTrace}",
-                "DesktopTodo 崩溃", MessageBoxButton.OK, MessageBoxImage.Error);
+            Log(e.Exception);
+            // 不再把完整堆栈弹给用户；详细信息写入本地日志。
+            MessageBox.Show("发生错误：" + e.Exception.Message,
+                "DesktopTodo", MessageBoxButton.OK, MessageBoxImage.Error);
             e.Handled = true;
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
-            var ex = e.ExceptionObject as Exception;
-            MessageBox.Show($"未处理错误: {ex?.Message}", "DesktopTodo", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (e.ExceptionObject is Exception ex) Log(ex);
         };
     }
 
@@ -29,8 +30,23 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"启动失败: {ex.Message}\n\n{ex.StackTrace}",
+            Log(ex);
+            MessageBox.Show("启动失败：" + ex.Message,
                 "DesktopTodo 启动错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private static void Log(Exception ex)
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DesktopTodo");
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "error.log"),
+                "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] " + ex + Environment.NewLine);
+        }
+        catch { /* 日志失败不影响主流程 */ }
     }
 }
