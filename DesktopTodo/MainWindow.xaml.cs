@@ -35,6 +35,8 @@ public partial class MainWindow : Window
 
     private DispatcherTimer? _timer;
     private bool _syncing;
+    private bool _exiting;
+    private bool _cleaned;
     private bool _pinned = true;
     private bool _showCompleted;
     private bool _dragging;
@@ -94,13 +96,34 @@ public partial class MainWindow : Window
             RestartTimer();
         };
 
-        Closed += (_, _) =>
-        {
-            _timer?.Stop();
-            SaveWindowGeometry();
-            _tray.Dispose();
-            _sync.Dispose();
-        };
+        // 只有托盘右键「退出」会走到这里；× / Alt+F4 都只隐藏窗口。
+        Closed += (_, _) => Cleanup();
+    }
+
+    /// <summary>托盘右键「退出」是唯一真正结束进程的入口。</summary>
+    private void ExitApplication()
+    {
+        _exiting = true;
+        Cleanup();
+        Application.Current.Shutdown();
+    }
+
+    /// <summary>任何关闭窗口的请求都只隐藏窗口，进程与右下角图标保留。</summary>
+    private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_exiting) { Cleanup(); return; }
+        e.Cancel = true;
+        Hide();
+    }
+
+    private void Cleanup()
+    {
+        if (_cleaned) return;
+        _cleaned = true;
+        _timer?.Stop();
+        try { SaveWindowGeometry(); } catch { /* 退出时不因写配置失败而阻断 */ }
+        _tray?.Dispose();
+        _sync?.Dispose();
     }
 
     private static CalDAVService CreateSyncService(AppConfig cfg)
@@ -208,10 +231,10 @@ public partial class MainWindow : Window
             Visible = true,
             ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
         };
-        tray.ContextMenuStrip.Items.Add("显示/隐藏", null, (_, _) => { if (IsVisible) Hide(); else Show(); });
+        tray.ContextMenuStrip.Items.Add("显示/隐藏", null, (_, _) => { if (IsVisible) Hide(); else { Show(); Activate(); } });
         tray.ContextMenuStrip.Items.Add("立即同步", null, async (_, _) => await _mgr.LoadFromRemoteAsync());
         tray.ContextMenuStrip.Items.Add(new System.Windows.Forms.ToolStripSeparator());
-        tray.ContextMenuStrip.Items.Add("退出", null, (_, _) => Application.Current.Shutdown());
+        tray.ContextMenuStrip.Items.Add("退出", null, (_, _) => ExitApplication());
         tray.DoubleClick += (_, _) => { Show(); Activate(); };
         return tray;
     }
@@ -250,7 +273,7 @@ public partial class MainWindow : Window
     }
 
     private void MinBtn_Click(object s, RoutedEventArgs e) => Hide();
-    private void CloseBtn_Click(object s, RoutedEventArgs e) => Application.Current.Shutdown();
+    private void CloseBtn_Click(object s, RoutedEventArgs e) => Hide();
 
     // ── Drag + Snap ──
 
