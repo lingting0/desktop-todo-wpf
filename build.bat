@@ -15,8 +15,16 @@ if exist "%USERPROFILE%\.dotnet\dotnet.exe" set "DOTNET_EXE=%USERPROFILE%\.dotne
 echo Using: %DOTNET_EXE%
 echo.
 
-echo Cleaning previous output (removes stale config.json / old binaries)...
-if exist ..\publish rd /s /q ..\publish
+echo Cleaning previous output (keeping config.json)...
+if exist ..\publish (
+  del /q ..\publish\*.dll ..\publish\*.exe ..\publish\*.pdb 2>nul
+  del /q ..\publish\ToDoIcon.* 2>nul
+  for %%f in (..\publish\*.json) do (
+    if /i not "%%~nxf"=="config.json" del /q "%%f"
+  )
+) else (
+  mkdir ..\publish
+)
 
 echo Restoring packages...
 "%DOTNET_EXE%" restore

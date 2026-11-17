@@ -11,6 +11,7 @@
   "snap_distance": 15,
   "theme": "暗黑",
   "auto_start": false,
+  "proxy_url": "",
   "update_check_enabled": true,
   "update_last_check_unix": 0,
   "update_snooze_until_unix": 0,

@@ -83,6 +83,7 @@ Windows 不自带 .NET 8，需要先安装 [**.NET 8 Desktop Runtime**](https://
 | 自签证书 SHA-256 指纹 | 可选。留空 = 系统严格校验；填入后只信任该指纹对应的证书 |
 | 主题 | 暗黑 / 亮白 / 深蓝 / 墨绿 / 暗紫 |
 | 开机自启 | 写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+| 代理地址 | 用于 GitHub 更新检查；留空 = 走系统代理。大部分用户需要代理才能访问 GitHub |
 
 ---
 
@@ -220,7 +221,7 @@ Windows 不自带 .NET 8，需要先安装 [**.NET 8 Desktop Runtime**](https://
 
 需要 **.NET 8 SDK**，在仓库根目录运行 `build.bat`：
 
-- 先清空旧的 `publish`（避免旧 dll / 旧 `config.json` 残留），再 `dotnet publish`
+- 先清空旧的二进制文件（保留 `config.json`），再 `dotnet publish`
 - 逐步检查返回码，失败时不再打印成功信息
 - 输出**不包含 `config.json`**；脚本优先使用用户级 SDK（`%USERPROFILE%\.dotnet\dotnet.exe`，无管理员权限时的安装位置），否则用 PATH 中的 `dotnet`
 - `build.bat --no-pause` 可用于自动化构建

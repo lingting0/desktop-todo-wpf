@@ -43,7 +43,7 @@ public partial class MainWindow : Window
     private bool _dragging;
 
     // 自动更新：后台静默检查，只在有新版本时点亮一个角标，绝不自动弹窗。
-    private readonly UpdateService _updateSvc = new();
+    private UpdateService _updateSvc;
     private readonly CancellationTokenSource _updateCts = new();
     private DispatcherTimer? _updateTimer;
     private UpdateInfo? _update;
@@ -75,6 +75,7 @@ public partial class MainWindow : Window
         _cfg = ConfigManager.Load();
         _sync = CreateSyncService(_cfg);
         _mgr = new TaskManager(_sync);
+        _updateSvc = new UpdateService(_cfg.ProxyUrl);
 
         _taskView = new System.Windows.Data.ListCollectionView(_mgr.Tasks)
         {
@@ -194,6 +195,9 @@ public partial class MainWindow : Window
         _sync = CreateSyncService(_cfg);
         _mgr.ReplaceSync(_sync);
         old.Dispose();
+
+        // 代理设置变了也要重建更新服务
+        _updateSvc = new UpdateService(_cfg.ProxyUrl);
 
         ApplyTheme(_cfg.Theme);
         Width = _cfg.CardWidth;
@@ -645,7 +649,7 @@ public class SettingsDialog : Window
 {
     private readonly AppConfig _target;
     private readonly AppConfig _draft;
-    private readonly TextBox _urlBox, _userBox, _calBox, _thumbBox, _intervalBox;
+    private readonly TextBox _urlBox, _userBox, _calBox, _thumbBox, _intervalBox, _proxyBox;
     private readonly PasswordBox _pwdBox;
     private readonly CheckBox _autoStartChk;
     private readonly ComboBox _themeCb;
@@ -657,7 +661,7 @@ public class SettingsDialog : Window
         _target = cfg;
         _draft = cfg.Clone();
 
-        Title = "设置 — Desktop Todo"; Width = 440; Height = 580;
+        Title = "设置 — Desktop Todo"; Width = 440; Height = 620;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         WindowStyle = WindowStyle.ToolWindow; ResizeMode = ResizeMode.NoResize;
 
@@ -680,6 +684,10 @@ public class SettingsDialog : Window
         sp.Children.Add(_themeCb);
         _autoStartChk = new CheckBox { Content = "开机自启", IsChecked = _draft.AutoStart };
         sp.Children.Add(_autoStartChk);
+        sp.Children.Add(MakeLabel("代理地址（用于更新检查，留空 = 走系统代理）:"));
+        _proxyBox = MakeTextBox(_draft.ProxyUrl);
+        _proxyBox.ToolTip = "例：http://127.0.0.1:7897";
+        sp.Children.Add(_proxyBox);
 
         var testRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 4) };
         _testBtn = new Button { Content = "测试连接", Width = 100, Height = 28 };
@@ -721,6 +729,7 @@ public class SettingsDialog : Window
         _draft.SyncIntervalSeconds = int.TryParse(_intervalBox.Text.Trim(), out var n) ? n : 300;
         _draft.Theme = _themeCb.SelectedItem?.ToString() ?? "暗黑";
         _draft.AutoStart = _autoStartChk.IsChecked ?? false;
+        _draft.ProxyUrl = _proxyBox.Text.Trim();
         return _draft;
     }
 
@@ -781,6 +790,7 @@ public class SettingsDialog : Window
         to.SyncIntervalSeconds = from.SyncIntervalSeconds;
         to.Theme = from.Theme;
         to.AutoStart = from.AutoStart;
+        to.ProxyUrl = from.ProxyUrl;
     }
 
     /// <summary>开机自启写入注册表 Run 项；不再把 exe 复制成假的 .lnk。</summary>

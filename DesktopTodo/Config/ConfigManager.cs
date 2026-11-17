@@ -53,6 +53,10 @@ public class AppConfig
     [JsonPropertyName("auto_start")]
     public bool AutoStart { get; set; }
 
+    /// <summary>手动代理地址（如 http://127.0.0.1:7897）。留空 = 走系统代理。</summary>
+    [JsonPropertyName("proxy_url")]
+    public string ProxyUrl { get; set; } = "";
+
     // ── 自动更新：全部是本机偏好，不进入仓库 ──
 
     /// <summary>是否允许后台检查更新；关掉后只能从托盘手动检查。</summary>
@@ -157,6 +161,7 @@ public static class ConfigManager
         if (cfg.UpdateSnoozeUntilUnix < 0) cfg.UpdateSnoozeUntilUnix = 0;
         cfg.UpdateIgnoredVersion ??= "";
         cfg.UpdateNotifiedVersion ??= "";
+        cfg.ProxyUrl = (cfg.ProxyUrl ?? "").Trim();
     }
 
     /// <summary>连接前校验，返回错误说明；无错误返回 null。</summary>

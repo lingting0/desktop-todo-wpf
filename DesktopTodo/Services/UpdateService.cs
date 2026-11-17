@@ -61,14 +61,26 @@ public sealed class UpdateService
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "DesktopTodo", "updates");
 
-    public UpdateService()
+    public UpdateService(string? proxyUrl = null)
     {
         var handler = new HttpClientHandler
         {
-            // 走系统代理设置；检测失败一律静默，不影响主功能。
-            UseProxy = true,
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
         };
+
+        var proxy = (proxyUrl ?? "").Trim();
+        if (!string.IsNullOrEmpty(proxy))
+        {
+            // 手动代理优先：用户明确指定的地址，不走系统代理。
+            handler.Proxy = new WebProxy(proxy, BypassOnLocal: false);
+            handler.UseProxy = true;
+        }
+        else
+        {
+            // 没有手动代理时走系统代理（默认行为）。
+            handler.UseProxy = true;
+        }
+
         _http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(5) };
         // GitHub REST API 要求带 User-Agent，否则返回 403。
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopTodo/" + CurrentVersionText);
