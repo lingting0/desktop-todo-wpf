@@ -10,5 +10,10 @@
   "card_position_y": 50,
   "snap_distance": 15,
   "theme": "暗黑",
-  "auto_start": false
+  "auto_start": false,
+  "update_check_enabled": true,
+  "update_last_check_unix": 0,
+  "update_snooze_until_unix": 0,
+  "update_ignored_version": "",
+  "update_notified_version": ""
 }

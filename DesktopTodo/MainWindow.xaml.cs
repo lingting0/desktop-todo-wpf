@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -40,6 +41,15 @@ public partial class MainWindow : Window
     private bool _pinned = true;
     private bool _showCompleted;
     private bool _dragging;
+
+    // 自动更新：后台静默检查，只在有新版本时点亮一个角标，绝不自动弹窗。
+    private readonly UpdateService _updateSvc = new();
+    private readonly CancellationTokenSource _updateCts = new();
+    private DispatcherTimer? _updateTimer;
+    private UpdateInfo? _update;
+    private UpdateDialog? _updateDialog;
+    private System.Windows.Forms.ToolStripMenuItem? _trayUpdateItem;
+    private bool _updateChecking;
 
     private static readonly Dictionary<string, (string card, string title)> Themes = new()
     {
@@ -92,6 +102,8 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
+            // 更新检查不依赖 Nextcloud 是否可连：服务器宕机 / 断网时也应能收到新版本提醒。
+            StartUpdateScheduler();
             await ConnectAndLoadAsync();
             RestartTimer();
         };
@@ -121,6 +133,9 @@ public partial class MainWindow : Window
         if (_cleaned) return;
         _cleaned = true;
         _timer?.Stop();
+        _updateTimer?.Stop();
+        _updateCts.Cancel();
+        try { _updateDialog?.Close(); } catch { /* 退出时不阻断 */ }
         try { SaveWindowGeometry(); } catch { /* 退出时不因写配置失败而阻断 */ }
         _tray?.Dispose();
         _sync?.Dispose();
@@ -191,6 +206,147 @@ public partial class MainWindow : Window
             : "设置已应用，但连接失败 — 请打开设置点「测试连接」排查";
     }
 
+    // ── 自动更新 ──
+
+    /// <summary>启动 8 秒后首次检查；之后每 6 小时复查（内部再按 24 小时节流）。</summary>
+    private void StartUpdateScheduler()
+    {
+        // 演练模式带 --pretend-version：立即手动检查并打开更新窗口，便于真实验收。
+        if (UpdateService.OverrideVersion != null)
+            _ = CheckForUpdateAsync(true);
+        else
+            _ = DelayedFirstCheckAsync();
+        _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(6) };
+        _updateTimer.Tick += async (_, _) => await MaybeCheckForUpdateAsync();
+        _updateTimer.Start();
+    }
+
+    private async Task DelayedFirstCheckAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(8), _updateCts.Token);
+            await MaybeCheckForUpdateAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* 自动检查的任何异常都静默 */ }
+    }
+
+    /// <summary>后台节流：关掉检查 / 稍后提醒期内 / 距上次不足 24 小时，都直接跳过。</summary>
+    private async Task MaybeCheckForUpdateAsync()
+    {
+        if (_updateChecking || !_cfg.UpdateCheckEnabled) return;
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (_cfg.UpdateSnoozeUntilUnix > now) return;
+        if (_cfg.UpdateLastCheckUnix > 0 && now - _cfg.UpdateLastCheckUnix < 24 * 3600) return;
+        await CheckForUpdateAsync(false);
+    }
+
+    /// <summary>真正发起检查。manual=true 时给明确反馈；自动检查失败完全静默。</summary>
+    private async Task CheckForUpdateAsync(bool manual)
+    {
+        if (_updateChecking) return;
+        _updateChecking = true;
+        try
+        {
+            _cfg.UpdateLastCheckUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ConfigManager.SaveUpdateState(_cfg);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var info = await _updateSvc.CheckAsync(cts.Token);
+            if (info == null)
+            {
+                if (manual) StatusLabel.Text = "已是最新版本 v" + UpdateService.CurrentVersionText;
+                return;
+            }
+            if (!manual && info.Version == _cfg.UpdateIgnoredVersion) return;
+            PublishUpdate(info, manual);
+        }
+        catch (Exception ex)
+        {
+            // 自动检查失败：不弹窗、不写状态栏、不打扰；手动检查才说明原因。
+            if (manual)
+                StatusLabel.Text = "检查更新失败：" + ex.Message + "（不影响使用，可稍后重试）";
+        }
+        finally { _updateChecking = false; }
+    }
+
+    /// <summary>只点亮角标与托盘菜单，不弹窗、不弹气泡、不抢焦点。</summary>
+    private void PublishUpdate(UpdateInfo info, bool manual)
+    {
+        _update = info;
+        UpdateBtn.Visibility = Visibility.Visible;
+        UpdateBtn.ToolTip = $"发现新版本 v{info.Version} — 点击一键更新";
+        if (_trayUpdateItem != null)
+        {
+            _trayUpdateItem.Text = "更新到 v" + info.Version;
+            _trayUpdateItem.Visible = true;
+        }
+        _tray.Text = "Desktop Todo — 新版本 v" + info.Version;
+
+        if (info.Version != _cfg.UpdateNotifiedVersion)
+        {
+            _cfg.UpdateNotifiedVersion = info.Version;
+            ConfigManager.SaveUpdateState(_cfg);
+            StatusLabel.Text = $"发现新版本 v{info.Version} — 点标题栏 ⬆ 可一键更新（不会打断使用）";
+        }
+        if (manual) ShowUpdateDialog();
+    }
+
+    private void HideUpdateHint()
+    {
+        _update = null;
+        UpdateBtn.Visibility = Visibility.Collapsed;
+        if (_trayUpdateItem != null) _trayUpdateItem.Visible = false;
+        _tray.Text = "Desktop Todo";
+    }
+
+    /// <summary>用户主动点击查看，会话内只显示一次，重复点击只是激活已有窗口。</summary>
+    private void ShowUpdateDialog()
+    {
+        var info = _update;
+        if (info == null) return;
+        if (_updateDialog != null && _updateDialog.IsVisible)
+        {
+            _updateDialog.Activate();
+            return;
+        }
+
+        _updateDialog = new UpdateDialog(
+            info,
+            PerformUpdateAsync,
+            () =>
+            {
+                _cfg.UpdateSnoozeUntilUnix =
+                    DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3L * 24 * 3600;
+                ConfigManager.SaveUpdateState(_cfg);
+                HideUpdateHint();
+                StatusLabel.Text = "更新提醒已延后 3 天";
+            },
+            () =>
+            {
+                _cfg.UpdateIgnoredVersion = info.Version;
+                ConfigManager.SaveUpdateState(_cfg);
+                HideUpdateHint();
+                StatusLabel.Text = "已忽略 v" + info.Version + "；之后发布的新版本仍会提醒";
+            })
+        { Owner = this };
+        _updateDialog.Show();
+    }
+
+    /// <summary>一键更新：下载 → 校验 → 启动更新器 → 真正退出 → 由更新器替换并重启。</summary>
+    private async Task PerformUpdateAsync(IProgress<string> progress)
+    {
+        var info = _update ?? throw new InvalidOperationException("更新信息已失效，请重新检查更新");
+        var staged = await _updateSvc.PrepareAsync(info, progress, _updateCts.Token);
+        progress.Report("更新包已就绪，正在重启完成更新...");
+        if (!UpdateService.StartUpdater(staged, Environment.ProcessId))
+            throw new InvalidOperationException("更新程序启动失败，请到 Releases 手动下载覆盖");
+        ExitApplication();
+    }
+
+    private void UpdateBtn_Click(object s, RoutedEventArgs e) => ShowUpdateDialog();
+
     // ── Theme ──
 
     private void ApplyTheme(string name)
@@ -233,7 +389,16 @@ public partial class MainWindow : Window
         };
         tray.ContextMenuStrip.Items.Add("显示/隐藏", null, (_, _) => { if (IsVisible) Hide(); else { Show(); Activate(); } });
         tray.ContextMenuStrip.Items.Add("立即同步", null, async (_, _) => await _mgr.LoadFromRemoteAsync());
+        tray.ContextMenuStrip.Items.Add("检查更新", null, async (_, _) => await CheckForUpdateAsync(true));
+        _trayUpdateItem = new System.Windows.Forms.ToolStripMenuItem("更新到新版本")
+        {
+            Visible = false,
+            Font = new System.Drawing.Font(tray.ContextMenuStrip.Font, System.Drawing.FontStyle.Bold)
+        };
+        _trayUpdateItem.Click += (_, _) => ShowUpdateDialog();
+        tray.ContextMenuStrip.Items.Add(_trayUpdateItem);
         tray.ContextMenuStrip.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        tray.ContextMenuStrip.Items.Add("反馈与建议", null, (_, _) => FeedbackBtn_Click());
         tray.ContextMenuStrip.Items.Add("退出", null, (_, _) => ExitApplication());
         tray.DoubleClick += (_, _) => { Show(); Activate(); };
         return tray;
@@ -274,6 +439,23 @@ public partial class MainWindow : Window
 
     private void MinBtn_Click(object s, RoutedEventArgs e) => Hide();
     private void CloseBtn_Click(object s, RoutedEventArgs e) => Hide();
+
+    /// <summary>反馈与建议：打开默认邮件客户端，预填收件人。</summary>
+    private void FeedbackBtn_Click()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "mailto:llingting0@qq.com?subject=Desktop%20Todo%20%E5%8F%8D%E9%A6%88",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "无法打开邮件客户端：" + ex.Message + "（请手动发到 llingting0@qq.com）";
+        }
+    }
 
     // ── Drag + Snap ──
 

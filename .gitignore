@@ -1,6 +1,8 @@
 bin/
 obj/
 publish/
+dist/
+.release-build/
 .vs/
 *.user
 DesktopTodo/config.json

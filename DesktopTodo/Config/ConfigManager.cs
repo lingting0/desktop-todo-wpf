@@ -53,6 +53,28 @@ public class AppConfig
     [JsonPropertyName("auto_start")]
     public bool AutoStart { get; set; }
 
+    // ── 自动更新：全部是本机偏好，不进入仓库 ──
+
+    /// <summary>是否允许后台检查更新；关掉后只能从托盘手动检查。</summary>
+    [JsonPropertyName("update_check_enabled")]
+    public bool UpdateCheckEnabled { get; set; } = true;
+
+    /// <summary>上次检查时间（UTC Unix 秒），用于 24 小时节流。</summary>
+    [JsonPropertyName("update_last_check_unix")]
+    public long UpdateLastCheckUnix { get; set; }
+
+    /// <summary>「稍后提醒」截止时间（UTC Unix 秒）。</summary>
+    [JsonPropertyName("update_snooze_until_unix")]
+    public long UpdateSnoozeUntilUnix { get; set; }
+
+    /// <summary>「忽略此版本」记录的版本号。</summary>
+    [JsonPropertyName("update_ignored_version")]
+    public string UpdateIgnoredVersion { get; set; } = "";
+
+    /// <summary>已经提示过的版本，避免每次启动重复写状态栏。</summary>
+    [JsonPropertyName("update_notified_version")]
+    public string UpdateNotifiedVersion { get; set; } = "";
+
     /// <summary>深拷贝一份，供设置对话框「测试连接」使用，不污染当前配置。</summary>
     public AppConfig Clone() => (AppConfig)MemberwiseClone();
 }
@@ -109,6 +131,19 @@ public static class ConfigManager
         WriteJson(cfg);
     }
 
+    /// <summary>
+    /// 只持久化更新偏好，不触碰凭据管理器。自动检查失败也不应写坏配置。
+    /// </summary>
+    public static void SaveUpdateState(AppConfig cfg)
+    {
+        try
+        {
+            cfg.LegacyAppPassword = null;
+            WriteJson(cfg);
+        }
+        catch { /* 更新状态写盘失败不影响更新检测 */ }
+    }
+
     public static void Normalize(AppConfig cfg)
     {
         if (cfg.SyncIntervalSeconds < 30 || cfg.SyncIntervalSeconds > 86400)
@@ -118,6 +153,10 @@ public static class ConfigManager
         if (cfg.SnapDistance < 0 || cfg.SnapDistance > 100) cfg.SnapDistance = 15;
         cfg.CertificateThumbprint = (cfg.CertificateThumbprint ?? "")
             .Replace(":", "").Replace(" ", "").Trim();
+        if (cfg.UpdateLastCheckUnix < 0) cfg.UpdateLastCheckUnix = 0;
+        if (cfg.UpdateSnoozeUntilUnix < 0) cfg.UpdateSnoozeUntilUnix = 0;
+        cfg.UpdateIgnoredVersion ??= "";
+        cfg.UpdateNotifiedVersion ??= "";
     }
 
     /// <summary>连接前校验，返回错误说明；无错误返回 null。</summary>

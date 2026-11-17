@@ -8,6 +8,7 @@
 - 任务增删改、勾选完成、右键设优先级（红高 / 橙中 / 蓝低）
 - 与 Nextcloud Tasks 双向同步，添加 / 编辑 / 完成 / 删除 / 优先级变更立即写回服务器
 - 不在任务栏显示按钮，只在右下角系统托盘常驻图标；「×」只隐藏窗口，不会结束程序
+- **自动检测更新**：静默检查、只点亮一个角标，点一下即可完成下载与重启（见下文）
 
 ---
 
@@ -15,7 +16,7 @@
 
 ### 1. 下载并解压
 
-到 [Releases 页面](https://github.com/lingting0/desktop-todo-wpf/releases/latest) 下载 `DesktopTodo-v1.0.0-win-x64.zip`，解压到任意普通文件夹（不要放进需要管理员权限的目录，例如 `C:\Program Files`）。
+到 [Releases 页面](https://github.com/lingting0/desktop-todo-wpf/releases/latest) 下载最新的 `DesktopTodo-vX.Y.Z-win-x64.zip`（**v1.1.0 及以上**才带自动更新），解压到任意普通文件夹（不要放进需要管理员权限的目录，例如 `C:\Program Files`）。
 
 **解压即用，没有安装向导**：双击 `DesktopTodo.exe` 即可。
 
@@ -115,6 +116,70 @@ Windows 不自带 .NET 8，需要先安装 [**.NET 8 Desktop Runtime**](https://
 
 ---
 
+## 自动更新（低打扰）
+
+从 **v1.1.0** 起，程序会自己检查 GitHub Releases 上的新版本。设计目标是「有提醒、不打扰、点一下就更新」。
+
+### 什么时候检查
+
+| 时机 | 行为 |
+|---|---|
+| 启动 8 秒后 | 静默检查一次 |
+| 之后每 6 小时 | 复查一次（内部按 24 小时节流，实际每天最多一次） |
+| 网络不通 / API 失败 / 限流 | **完全静默**：不弹窗、不写状态栏、不影响待办同步 |
+| 托盘右键「检查更新」 | 手动立即检查，明确告知「已是最新版本」或打开更新窗口 |
+
+检查只读取本仓库的公开 Release 元数据，**不上传任何数据**；也不依赖 Nextcloud 是否可连。
+
+### 有新版本时怎么提醒
+
+**不弹窗、不弹气泡、不抢焦点。** 只做三处被动可见的提示：
+
+- 标题栏出现橙色 **⬆** 角标（悬停显示版本号）
+- 托盘右键菜单多出「更新到 vX.Y.Z」，托盘图标提示文字也带上版本号
+- 状态栏显示一行「发现新版本…」，**同一个版本只显示一次**
+
+点 **⬆** 或托盘的「更新到…」才会打开一个非模态窗口：
+
+| 按钮 | 效果 |
+|---|---|
+| **立即更新** | 一键完成 下载 → 校验 → 退出 → 替换 → 自动重启，全程不用再点 |
+| 稍后提醒 | 延后 **3 天**，期间角标与菜单项都收起 |
+| 忽略此版本 | 这个版本以后不再提醒；**之后发布的新版本仍会提醒** |
+| 关闭 | 什么都不改，角标仍在，想更新随时点 |
+
+### 一键更新做了什么
+
+1. 从 GitHub Release 下载 `DesktopTodo-vX.Y.Z-win-x64.zip`，窗口内显示进度
+2. 若 Release 同时提供 `.sha256` 资产则校验 SHA-256；否则校验 zip 完整性与必需文件
+3. 备份当前程序文件到 `%LOCALAPPDATA%\DesktopTodo\updates\backup-*`
+4. 结束当前进程（这一步是真正的退出，不是「×」的隐藏），由暂存目录里的新 exe 完成替换
+5. 自动启动新版本
+
+**`config.json`、窗口位置、主题和 Windows 凭据管理器里的应用密码全部原样保留**——发行包不含 `config.json`，替换时也会主动跳过它。
+
+安全约束：只接受 https 且来自 `github.com` / `*.githubusercontent.com` 的地址；解压防路径穿越；缺 `DesktopTodo.exe` / `.dll` / `.runtimeconfig.json` 任一个即中止；**拒绝降级**到比当前程序更旧的版本。更新日志在 `%LOCALAPPDATA%\DesktopTodo\update.log`。
+
+### 自己控制
+
+`config.json` 里可改（都是本机偏好，不会进仓库）：
+
+| 字段 | 说明 |
+|---|---|
+| `update_check_enabled` | `false` = 关掉后台自动检查，仍可从托盘手动检查 |
+| `update_last_check_unix` | 上次检查的 UTC Unix 秒，用于 24 小时节流 |
+| `update_snooze_until_unix` | 「稍后提醒」截止时间 |
+| `update_ignored_version` | 被忽略的版本号 |
+| `update_notified_version` | 已提示过的版本，避免重复写状态栏 |
+
+### ⚠️ 首次需要手动升级一次
+
+**v1.0.0 及更早的版本没有更新功能**，不会自己跳到 v1.1.0。请先到 Releases 下载一次 v1.1.0 的 zip 覆盖原目录（配置不会丢），**之后**发布的版本才能自动提醒与一键更新。这是自动更新功能的固有限制：第一版更新器只能从下一版开始生效。
+
+验收整套流程可用命令行 `DesktopTodo.exe --pretend-version 1.0.0` 把当前版本伪装成旧版启动，程序会立即检查并打开更新窗口（仅用于验收，正常启动不要带此参数）。
+
+---
+
 ## 同步行为与已知限制
 
 - 定时全量拉取；本地的添加 / 编辑 / 完成 / 删除 / 优先级变更立即写回服务器。
@@ -137,6 +202,17 @@ Windows 不自带 .NET 8，需要先安装 [**.NET 8 Desktop Runtime**](https://
 | 找不到窗口 | 双击托盘图标，或右键 →「显示/隐藏」 |
 | 想换账号 / 重置配置 | 设置页改后保存即可；如需清空凭据，到 Windows 凭据管理器删掉 `DesktopTodo/Nextcloud/...` 条目 |
 | 改了设置没生效 | 当前版本保存即生效；若仍异常，用托盘退出后重新打开 |
+| 不想被提醒更新 | 更新窗口点「忽略此版本」，或把 `config.json` 的 `update_check_enabled` 设为 `false` |
+| 更新中途失败 | 旧版本文件仍在，可直接重新运行；详情见 `%LOCALAPPDATA%\DesktopTodo\update.log`，必要时用 `updates\backup-*` 还原 |
+| 点了「立即更新」后程序消失 | 属预期：正在替换文件并重启，几秒后会自动回来 |
+
+---
+
+## 反馈与建议
+
+遇到 bug、有功能想法或想吐槽，欢迎邮件联系：**llingting0@qq.com**
+
+也可以在托盘右键菜单点「反馈与建议」，会自动打开默认邮件客户端并填好收件人。
 
 ---
 
@@ -150,6 +226,21 @@ Windows 不自带 .NET 8，需要先安装 [**.NET 8 Desktop Runtime**](https://
 - `build.bat --no-pause` 可用于自动化构建
 
 请勿手工把 `config.json` 放进 `publish` 目录，也不要把含凭据的文件打包分发。
+
+### 发布 Release（维护者）
+
+`build.bat` 只生成本地 `publish`。要发布到 GitHub Releases，在仓库根目录运行：
+
+```text
+python make-release.py
+```
+
+脚本会读取 `DesktopTodo.csproj` 里的 `<Version>`，做一次**不带调试符号**的干净构建、逐个文件扫描隐私、生成：
+
+- `dist/DesktopTodo-vX.Y.Z-win-x64.zip`
+- `dist/DesktopTodo-vX.Y.Z-win-x64.zip.sha256`
+
+**两个文件必须一起上传到 tag 为 `vX.Y.Z` 的 Release**，程序靠它们完成校验与一键更新。`dist/` 与 `.release-build/` 已被 `.gitignore` 排除。发版前记得同步递增 `<Version>` 与 Release tag。
 
 ---
 

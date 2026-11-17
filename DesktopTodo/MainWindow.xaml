@@ -27,10 +27,11 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Title Bar：6 列，与 6 个标题栏元素一一对应 -->
+            <!-- Title Bar：7 列，与 7 个标题栏元素一一对应 -->
             <Grid Grid.Row="0" Background="{DynamicResource TitleBg}" MouseLeftButtonDown="TitleBar_Drag">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
@@ -41,23 +42,29 @@
                            FontSize="14" FontWeight="Bold" VerticalAlignment="Center"
                            Margin="12,0,0,0" Grid.Column="0"
                            MouseRightButtonUp="TitleLabel_RightClick"/>
-                <Button x:Name="PinBtn" Content="◆" Grid.Column="1"
+                <!-- 只有检测到新版本时才显示；自动检测不会弹窗 -->
+                <Button x:Name="UpdateBtn" Content="⬆" Grid.Column="1"
+                        Width="28" Height="24" Margin="0,0,4,0"
+                        Foreground="#f39c12" Background="Transparent" BorderThickness="0"
+                        FontWeight="Bold" Visibility="Collapsed"
+                        Click="UpdateBtn_Click" ToolTip="发现新版本，点击更新"/>
+                <Button x:Name="PinBtn" Content="◆" Grid.Column="2"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="PinBtn_Click" ToolTip="已置顶 — 点击取消"/>
-                <Button x:Name="FilterBtn" Content="☐" Grid.Column="2"
+                <Button x:Name="FilterBtn" Content="☐" Grid.Column="3"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="FilterBtn_Click" ToolTip="显示已完成"/>
-                <Button Content="⚙" Grid.Column="3"
+                <Button Content="⚙" Grid.Column="4"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="SettingsBtn_Click" ToolTip="设置"/>
-                <Button Content="─" Grid.Column="4"
+                <Button Content="─" Grid.Column="5"
                         Width="28" Height="24"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="MinBtn_Click" ToolTip="最小化到托盘"/>
-                <Button Content="×" Grid.Column="5"
+                <Button Content="×" Grid.Column="6"
                         Width="28" Height="24" Margin="0,0,4,0"
                         Foreground="#888" Background="Transparent" BorderThickness="0"
                         Click="CloseBtn_Click" ToolTip="隐藏到托盘（不退出）"/>
