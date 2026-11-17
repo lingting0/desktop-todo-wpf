@@ -84,24 +84,37 @@ def build() -> None:
         raise SystemExit("dotnet publish 失败，已停止打包")
 
 
+def scan_views(data: bytes):
+    """Yield byte views of data covering both ASCII and UTF-16LE encoding."""
+    yield data
+    # .NET 二进制中字符串以 UTF-16LE 存储，ASCII 正则无法命中。
+    for offset in (0, 1):
+        try:
+            text = data[offset:].decode("utf-16le", errors="ignore")
+            yield text.encode("utf-8", errors="ignore")
+        except Exception:
+            pass
+
+
 def scan(name: str, data: bytes) -> list[str]:
     problems = []
-    for label, pattern in PATTERNS:
-        if re.search(pattern, data):
-            problems.append(label)
-    for m in PDB_PATH_RE.finditer(data):
-        chunk = m.group(0)
-        if any(marker in chunk for marker in SDK_BUILD_MARKERS):
-            continue  # SDK 自带模板路径，不是用户机器
-        problems.append("调试符号路径")
-        break
-    for host in URL_RE.findall(data):
-        h = host.decode("ascii", "ignore").lower()
-        if h in ALLOWED_HOSTS or h.endswith(".example.com"):
-            continue
-        if any(h == a or h.endswith("." + a) for a in ALLOWED_HOSTS):
-            continue
-        problems.append("未白名单域名: " + h)
+    for view in scan_views(data):
+        for label, pattern in PATTERNS:
+            if re.search(pattern, view):
+                problems.append(label)
+        for m in PDB_PATH_RE.finditer(view):
+            chunk = m.group(0)
+            if any(marker in chunk for marker in SDK_BUILD_MARKERS):
+                continue  # SDK 自带模板路径，不是用户机器
+            problems.append("调试符号路径")
+            break
+        for host in URL_RE.findall(view):
+            h = host.decode("ascii", "ignore").lower()
+            if h in ALLOWED_HOSTS or h.endswith(".example.com"):
+                continue
+            if any(h == a or h.endswith("." + a) for a in ALLOWED_HOSTS):
+                continue
+            problems.append("未白名单域名: " + h)
     return sorted(set(problems))
 
 
@@ -129,22 +142,30 @@ def main() -> None:
 
     print("\n=== 打包前隐私检查 ===")
     failed = False
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in files:
-            data = p.read_bytes()
-            issues = scan(p.name, data)
-            print(f"  {p.name:38s} {'OK' if not issues else '⚠ ' + ', '.join(issues)}")
-            failed |= bool(issues)
-            z.write(p, p.name)
-        for e in extras:
-            data = e.read_bytes()
-            issues = scan(e.name, data)
-            print(f"  {e.name:38s} {'OK' if not issues else '⚠ ' + ', '.join(issues)}")
-            failed |= bool(issues)
-            z.write(e, e.name)
+    # 先扫描全部文件，确认无问题后再写 zip。
+    all_files = []
+    for p in files:
+        issues = scan(p.name, p.read_bytes())
+        print(f"  {p.name:38s} {'OK' if not issues else '⚠ ' + ', '.join(issues)}")
+        if issues:
+            failed = True
+        all_files.append(p)
+    for e in extras:
+        issues = scan(e.name, e.read_bytes())
+        print(f"  {e.name:38s} {'OK' if not issues else '⚠ ' + ', '.join(issues)}")
+        if issues:
+            failed = True
+        all_files.append(e)
+
     if failed:
-        zip_path.unlink(missing_ok=True)
-        raise SystemExit("发现疑似隐私内容，已删除 zip，请检查后再发布")
+        raise SystemExit("发现疑似隐私内容，未生成 zip，请检查后再发布")
+
+    # 扫描通过后才写 zip（通过临时文件 + 原子改名）。
+    tmp_zip = zip_path.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in all_files:
+            z.write(p, p.name)
+    tmp_zip.rename(zip_path)
 
     with zipfile.ZipFile(zip_path) as z:
         contents = z.namelist()

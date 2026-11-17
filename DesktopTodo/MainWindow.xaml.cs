@@ -138,6 +138,8 @@ public partial class MainWindow : Window
         _updateCts.Cancel();
         try { _updateDialog?.Close(); } catch { /* 退出时不阻断 */ }
         try { SaveWindowGeometry(); } catch { /* 退出时不因写配置失败而阻断 */ }
+        try { _updateSvc?.Dispose(); } catch { /* 释放失败不阻断 */ }
+        _updateCts.Dispose();
         _tray?.Dispose();
         _sync?.Dispose();
     }
@@ -179,7 +181,11 @@ public partial class MainWindow : Window
     {
         if (_syncing) return; // 防止慢网络下重叠触发
         _syncing = true;
-        try { await _mgr.LoadFromRemoteAsync(); }
+        try
+        {
+            // 首次连接失败后，定时同步应尝试重新连接。
+            await _mgr.SyncAsync();
+        }
         finally { _syncing = false; }
     }
 
@@ -191,10 +197,33 @@ public partial class MainWindow : Window
         int guard = 0;
         while (_syncing && guard++ < 100) await Task.Delay(50);
 
+        // 创建新服务实例，先连接+读取成功后再切换（原子会话切换）。
+        var candidate = CreateSyncService(_cfg);
+        List<TaskData>? initialTasks = null;
+        try
+        {
+            await candidate.ConnectAsync();
+            initialTasks = await candidate.FetchAllAsync();
+        }
+        catch (Exception ex)
+        {
+            candidate.Dispose();
+            StatusLabel.Text = "设置已应用，但连接失败 — " + ex.Message + "（旧任务保留，请检查配置后重试）";
+            RestartTimer();
+            return;
+        }
+
+        // 连接+读取成功，原子切换。
         var old = _sync;
-        _sync = CreateSyncService(_cfg);
+        _sync = candidate;
         _mgr.ReplaceSync(_sync);
         old.Dispose();
+
+        // 把刚读到的任务直接灌入，不用再 FetchAll 一次。
+        _mgr.Tasks.Clear();
+        foreach (var t in initialTasks)
+            _mgr.Tasks.Add(t);
+        StatusLabel.Text = $"已同步 {_mgr.Tasks.Count} 个任务 (日历: {_sync.CalendarName})";
 
         // 代理设置变了也要重建更新服务
         _updateSvc = new UpdateService(_cfg.ProxyUrl);
@@ -203,11 +232,8 @@ public partial class MainWindow : Window
         Width = _cfg.CardWidth;
         Height = _cfg.CardHeight;
 
-        var ok = await ConnectAndLoadAsync();
         RestartTimer();
-        StatusLabel.Text = ok
-            ? "设置已生效（无需重启）— 日历：" + _sync.CalendarName
-            : "设置已应用，但连接失败 — 请打开设置点「测试连接」排查";
+        StatusLabel.Text = "设置已生效（无需重启）— 日历：" + _sync.CalendarName;
     }
 
     // ── 自动更新 ──
@@ -253,11 +279,14 @@ public partial class MainWindow : Window
         _updateChecking = true;
         try
         {
+            // 只在检查成功后才写节流时间；失败时用 5 分钟短退避。
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var info = await _updateSvc.CheckAsync(cts.Token);
+
+            // 检查成功：写入 24 小时节流。
             _cfg.UpdateLastCheckUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             ConfigManager.SaveUpdateState(_cfg);
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var info = await _updateSvc.CheckAsync(cts.Token);
             if (info == null)
             {
                 if (manual) StatusLabel.Text = "已是最新版本 v" + UpdateService.CurrentVersionText;
@@ -268,9 +297,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            // 自动检查失败：不弹窗、不写状态栏、不打扰；手动检查才说明原因。
+            // 失败时用 5 分钟短退避，方便网络恢复后重试。
+            _cfg.UpdateLastCheckUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 24 * 3600 + 300;
+            ConfigManager.SaveUpdateState(_cfg);
             if (manual)
-                StatusLabel.Text = "检查更新失败：" + ex.Message + "（不影响使用，可稍后重试）";
+                StatusLabel.Text = "检查更新失败：" + ex.Message + "（不影响使用，5 分钟后自动重试）";
         }
         finally { _updateChecking = false; }
     }
@@ -392,7 +423,7 @@ public partial class MainWindow : Window
             ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
         };
         tray.ContextMenuStrip.Items.Add("显示/隐藏", null, (_, _) => { if (IsVisible) Hide(); else { Show(); Activate(); } });
-        tray.ContextMenuStrip.Items.Add("立即同步", null, async (_, _) => await _mgr.LoadFromRemoteAsync());
+        tray.ContextMenuStrip.Items.Add("立即同步", null, async (_, _) => await _mgr.SyncAsync());
         tray.ContextMenuStrip.Items.Add("检查更新", null, async (_, _) => await CheckForUpdateAsync(true));
         _trayUpdateItem = new System.Windows.Forms.ToolStripMenuItem("更新到新版本")
         {
@@ -823,15 +854,30 @@ public class SettingsDialog : Window
     {
         var draft = Collect();
         var error = ConfigManager.ValidateForConnection(draft);
-        if (error != null && !error.StartsWith("警告", StringComparison.Ordinal))
+        if (error != null)
         {
-            _result.Text = "无法保存：" + error;
-            return;
+            if (error.StartsWith("警告", StringComparison.Ordinal))
+            {
+                // HTTP 警告：弹窗确认，用户同意后持久化 allow_insecure_http。
+                var result = MessageBox.Show(
+                    error + "\n\n确定要使用 HTTP 吗？密码将以明文传输。",
+                    "安全警告", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (result != MessageBoxResult.Yes) return;
+                draft.AllowInsecureHttp = true;
+            }
+            else
+            {
+                _result.Text = "无法保存：" + error;
+                return;
+            }
         }
         ConfigManager.Normalize(draft);
         CopyTo(draft, _target);
-        SetAutoStart(_target.AutoStart);
-        DialogResult = true;
+        bool autoStartOk = SetAutoStart(_target.AutoStart);
+        if (_target.AutoStart && !autoStartOk)
+            _result.Text = "保存成功，但开机自启设置失败（权限不足）。其他设置已生效。";
+        else
+            DialogResult = true;
     }
 
     private static void CopyTo(AppConfig from, AppConfig to)
@@ -845,27 +891,30 @@ public class SettingsDialog : Window
         to.Theme = from.Theme;
         to.AutoStart = from.AutoStart;
         to.ProxyUrl = from.ProxyUrl;
+        to.AllowInsecureHttp = from.AllowInsecureHttp;
     }
 
-    /// <summary>开机自启写入注册表 Run 项；不再把 exe 复制成假的 .lnk。</summary>
-    private static void SetAutoStart(bool enable)
+    /// <summary>开机自启写入注册表 Run 项。返回实际是否成功。</summary>
+    private static bool SetAutoStart(bool enable)
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Run", true);
-            if (key == null) return;
+            if (key == null) return !enable; // 无法打开注册表，关闭自启视为无操作成功
             if (enable)
             {
                 var exe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DesktopTodo.exe");
-                if (File.Exists(exe)) key.SetValue("DesktopTodo", "\"" + exe + "\"");
+                if (File.Exists(exe)) { key.SetValue("DesktopTodo", "\"" + exe + "\""); return true; }
+                return false;
             }
             else
             {
                 key.DeleteValue("DesktopTodo", false);
+                return true;
             }
         }
-        catch { /* 权限不足时不阻断保存 */ }
+        catch { return false; }
     }
 
     private static TextBlock MakeLabel(string t) => new() { Text = t, Margin = new Thickness(0, 8, 0, 2) };

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -29,20 +30,36 @@ public class CalDAVService : IDisposable
         _baseUrl = (url ?? "").TrimEnd('/');
         _requestedCalendar = calendarName ?? "";
 
+        // 限定凭据发送范围：只对配置来源的 origin 发送 Basic 认证，
+        // 防止恶意 DAV 响应将凭据导向其他服务器。
+        var baseUri = new Uri(_baseUrl);
+        var credCache = new CredentialCache();
+        var cred = new NetworkCredential(username, password);
+        credCache.Add(baseUri, "Basic", cred);
+        // 如果配置了 http，凭据也会发给同来源的 http（用户已在保存时确认）。
+
         var handler = new HttpClientHandler
         {
-            Credentials = new NetworkCredential(username, password),
+            Credentials = credCache,
             PreAuthenticate = true,
+            // 关闭自动重定向：需要重定向时逐跳检查，防止凭据跟随到其他来源。
+            AllowAutoRedirect = false,
         };
 
         // P0-1：默认走系统严格证书校验。只有显式登记了指纹时才放宽，
         // 且仅接受该指纹对应的证书（可用于自签证书），不再无条件信任所有证书。
+        // 配置指纹后，即使系统校验通过也必须比较指纹（真正的 pinning）。
         var thumb = (certificateThumbprint ?? "").Replace(":", "").Replace(" ", "").Trim();
         if (thumb.Length > 0)
         {
+            // 校验指纹格式：必须是 64 位十六进制字符串（SHA-256）。
+            if (thumb.Length != 64 || !thumb.All(c =>
+                (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            {
+                throw new InvalidOperationException("证书指纹格式不正确，应为 64 位十六进制 SHA-256");
+            }
             handler.ServerCertificateCustomValidationCallback = (_, cert, _, errors) =>
             {
-                if (errors == SslPolicyErrors.None) return true;
                 if (cert == null) return false;
                 try
                 {
@@ -92,13 +109,15 @@ public class CalDAVService : IDisposable
     public async Task AddAsync(TaskData task)
     {
         if (_calendarUrl == null) throw new InvalidOperationException("尚未连接日历");
+        var url = ResourceUrl(task);
+        EnsureResourceInCalendar(url);
         var ical = BuildICal(task);
-        var req = new HttpRequestMessage(HttpMethod.Put, ResourceUrl(task))
+        using var req = new HttpRequestMessage(HttpMethod.Put, url)
         {
             Content = CalendarContent(ical)
         };
         req.Headers.TryAddWithoutValidation("If-None-Match", "*");
-        var resp = await _http.SendAsync(req);
+        using var resp = await _http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
             throw new InvalidOperationException("服务器上已存在相同 UID 的任务，未覆盖");
         EnsureOk(resp, "新增任务");
@@ -110,14 +129,16 @@ public class CalDAVService : IDisposable
     public async Task UpdateAsync(TaskData task)
     {
         if (_calendarUrl == null) throw new InvalidOperationException("尚未连接日历");
+        var url = ResourceUrl(task);
+        EnsureResourceInCalendar(url);
         var ical = BuildICal(task);
-        var req = new HttpRequestMessage(HttpMethod.Put, ResourceUrl(task))
+        using var req = new HttpRequestMessage(HttpMethod.Put, url)
         {
             Content = CalendarContent(ical)
         };
         if (!string.IsNullOrWhiteSpace(task.Etag))
             req.Headers.TryAddWithoutValidation("If-Match", task.Etag);
-        var resp = await _http.SendAsync(req);
+        using var resp = await _http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
             throw new InvalidOperationException("该任务已被其他设备修改，请刷新后重试");
         EnsureOk(resp, "更新任务");
@@ -128,10 +149,12 @@ public class CalDAVService : IDisposable
     public async Task DeleteAsync(TaskData task)
     {
         if (_calendarUrl == null) throw new InvalidOperationException("尚未连接日历");
-        var req = new HttpRequestMessage(HttpMethod.Delete, ResourceUrl(task));
+        var url = ResourceUrl(task);
+        EnsureResourceInCalendar(url);
+        using var req = new HttpRequestMessage(HttpMethod.Delete, url);
         if (!string.IsNullOrWhiteSpace(task.Etag))
             req.Headers.TryAddWithoutValidation("If-Match", task.Etag);
-        var resp = await _http.SendAsync(req);
+        using var resp = await _http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.NotFound) return; // 已删除视为成功
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
             throw new InvalidOperationException("该任务已被其他设备修改，未删除");
@@ -145,6 +168,8 @@ public class CalDAVService : IDisposable
 
     private static void EnsureOk(HttpResponseMessage resp, string action)
     {
+        if ((int)resp.StatusCode is >= 300 and <= 399)
+            throw new InvalidOperationException($"{action}失败：服务器返回重定向 {resp.StatusCode}，已拒绝（防止凭据跟随重定向）");
         if (!resp.IsSuccessStatusCode)
             throw new InvalidOperationException($"{action}失败：服务器返回 {(int)resp.StatusCode} {resp.ReasonPhrase}");
     }
@@ -152,28 +177,65 @@ public class CalDAVService : IDisposable
     private static void UpdateEtag(HttpResponseMessage resp, TaskData task)
     {
         var etag = resp.Headers.ETag?.ToString();
-        if (!string.IsNullOrWhiteSpace(etag)) task.Etag = etag;
+        if (!string.IsNullOrWhiteSpace(etag))
+            task.Etag = etag;
+        else
+            task.Etag = null; // ETag 缺失时清除旧值，下次操作退化为无条件
     }
 
     private string ResourceUrl(TaskData task)
     {
-        if (!string.IsNullOrWhiteSpace(task.Href)) return FullUrl(task.Href);
+        if (!string.IsNullOrWhiteSpace(task.Href)) return ResolveDavUri(task.Href);
         return (_calendarUrl ?? _baseUrl).TrimEnd('/') + "/" + Uri.EscapeDataString(task.Uid) + ".ics";
     }
 
-    private string FullUrl(string href)
+    /// <summary>校验待操作的资源 URL 属于当前选中的日历，防止跨日历操作。</summary>
+    private void EnsureResourceInCalendar(string url)
+    {
+        if (string.IsNullOrEmpty(_calendarUrl)) return;
+        var cal = _calendarUrl.TrimEnd('/');
+        if (!url.StartsWith(cal + "/", StringComparison.OrdinalIgnoreCase) &&
+            !url.Equals(cal, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("资源地址不属于当前日历，已拒绝操作");
+    }
+
+    /// <summary>
+    /// 解析 DAV 响应中的 href，强制同协议、同主机、同端口，
+    /// 防止恶意响应将请求（及凭据）导向其他来源。
+    /// </summary>
+    private string ResolveDavUri(string href)
     {
         href = (href ?? "").Trim();
-        if (href.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return href;
-        var idx = _baseUrl.IndexOf("/remote.php", StringComparison.OrdinalIgnoreCase);
-        var origin = idx >= 0 ? _baseUrl[..idx] : _baseUrl;
-        if (!href.StartsWith("/")) href = "/" + href;
-        return origin.TrimEnd('/') + href;
+        if (string.IsNullOrEmpty(href)) return _baseUrl;
+
+        var origin = new Uri(_baseUrl.TrimEnd('/') + "/");
+        Uri resolved;
+        if (href.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            // 绝对 URL：必须是同协议、同主机、同端口。
+            resolved = new Uri(href);
+        }
+        else
+        {
+            // 相对 URL：基于配置来源解析。
+            if (!href.StartsWith("/")) href = "/" + href;
+            resolved = new Uri(origin, href);
+        }
+
+        if (resolved.Scheme != origin.Scheme ||
+            !resolved.IdnHost.Equals(origin.IdnHost, StringComparison.OrdinalIgnoreCase) ||
+            resolved.Port != origin.Port ||
+            !string.IsNullOrEmpty(resolved.UserInfo))
+        {
+            throw new InvalidOperationException("服务器返回了不可信的 DAV 地址，已拒绝");
+        }
+
+        return resolved.ToString().TrimEnd('/');
     }
 
     private async Task<HttpResponseMessage> PropfindAsync(string url, string body, int depth = 0)
     {
-        var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), url)
+        using var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), url)
         {
             Content = new StringContent(body, Encoding.UTF8, "application/xml")
         };
@@ -196,7 +258,7 @@ public class CalDAVService : IDisposable
             .FirstOrDefault(h => h.Contains("/principals/", StringComparison.OrdinalIgnoreCase));
         if (string.IsNullOrEmpty(href))
             throw new Exception("服务器未返回 current-user-principal，请检查 Nextcloud URL");
-        return FullUrl(href);
+        return ResolveDavUri(href);
     }
 
     private async Task<string> FindCalendarHomeAsync(string principalUrl)
@@ -213,7 +275,7 @@ public class CalDAVService : IDisposable
             .FirstOrDefault();
         if (string.IsNullOrEmpty(href))
             throw new Exception("服务器未返回 calendar-home-set");
-        return FullUrl(href);
+        return ResolveDavUri(href);
     }
 
     private async Task<List<(string url, string name)>> ListCalendarsAsync(string calHome)
@@ -238,7 +300,7 @@ public class CalDAVService : IDisposable
             if (!hasVtodo) continue;
             var name = response.Descendants(nsD + "displayname")
                 .Select(e => e.Value.Trim()).FirstOrDefault() ?? "?";
-            results.Add((FullUrl(href), name));
+            results.Add((ResolveDavUri(href), name));
         }
         return results;
     }
@@ -248,7 +310,7 @@ public class CalDAVService : IDisposable
         if (calendars.Count == 0)
             throw new Exception("未找到支持 VTODO 的日历，请在 Nextcloud 中启用 Tasks 应用");
 
-        // 优先使用配置里指定的日历名，不再盲目选「任务最多」的那个。
+        // 优先使用配置里指定的日历名。
         if (!string.IsNullOrWhiteSpace(_requestedCalendar))
         {
             foreach (var cal in calendars)
@@ -260,6 +322,9 @@ public class CalDAVService : IDisposable
                     return;
                 }
             }
+            // 指定日历不存在时直接报错，不自动选择其他日历。
+            throw new InvalidOperationException(
+                $"未找到指定日历「{_requestedCalendar}」，请到设置页重新选择");
         }
 
         var best = calendars[0];
@@ -315,54 +380,97 @@ public class CalDAVService : IDisposable
         return tasks;
     }
 
-    // ── iCalendar（round-trip 保留未知字段）──
+    // ── iCalendar（round-trip 保留未知字段 + 组件层级 + 日期参数）──
 
+    // 只修改 VTODO 直属的受管属性；VALARM 等子组件中的同名属性保持不变。
     private static readonly string[] ManagedProps =
     {
         "UID", "SUMMARY", "STATUS", "PRIORITY", "DTSTAMP", "LAST-MODIFIED",
-        "CREATED", "COMPLETED", "PERCENT-COMPLETE", "DUE",
+        "CREATED", "COMPLETED", "PERCENT-COMPLETE",
     };
+
+    // DUE 单独处理：写回时保留原始参数（TZID/VALUE=DATE），
+    // 仅在没有原始数据时才用默认 UTC 格式生成。
 
     private static string BuildICal(TaskData t)
     {
+        // UID 安全校验：拒绝控制字符，防止注入额外 ICS 行。
+        if (string.IsNullOrWhiteSpace(t.Uid) || t.Uid.Any(char.IsControl))
+            throw new InvalidDataException("任务 UID 包含非法字符");
+
         var source = string.IsNullOrEmpty(t.RawICal)
             ? UnfoldLines("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//DesktopTodo//WPF//EN\r\nBEGIN:VTODO\r\nEND:VTODO\r\nEND:VCALENDAR")
             : UnfoldLines(t.RawICal);
 
+        // 只匹配第一个 BEGIN:VTODO 到第一个 END:VTODO（不跨多个 VTODO 组件）。
         int start = source.FindIndex(l => PropertyName(l) == "BEGIN" &&
                                           PropertyValue(l).Equals("VTODO", StringComparison.OrdinalIgnoreCase));
-        int end = source.FindLastIndex(l => PropertyName(l) == "END" &&
-                                            PropertyValue(l).Equals("VTODO", StringComparison.OrdinalIgnoreCase));
-
-        var lines = new List<string>();
-        if (start < 0 || end <= start)
+        if (start < 0)
         {
-            lines.Add("BEGIN:VCALENDAR");
-            lines.Add("VERSION:2.0");
-            lines.Add("PRODID:-//DesktopTodo//WPF//EN");
-            lines.Add("BEGIN:VTODO");
-            lines.AddRange(BuildManagedLines(t));
-            lines.Add("END:VTODO");
-            lines.Add("END:VCALENDAR");
-        }
-        else
-        {
-            for (int i = 0; i <= start; i++) lines.Add(source[i]);
-            for (int i = start + 1; i < end; i++)
+            // 没有嵌入 VTODO，从头构建。
+            var fresh = new List<string>
             {
-                if (ManagedProps.Contains(PropertyName(source[i]))) continue;
-                lines.Add(source[i]);
-            }
-            lines.AddRange(BuildManagedLines(t));
-            lines.Add(source[end]);
-            for (int i = end + 1; i < source.Count; i++) lines.Add(source[i]);
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "PRODID:-//DesktopTodo//WPF//EN",
+                "BEGIN:VTODO"
+            };
+            fresh.AddRange(BuildManagedLines(t, source, start, -1));
+            fresh.Add("END:VTODO");
+            fresh.Add("END:VCALENDAR");
+            return string.Join("\r\n", FoldAll(fresh)) + "\r\n";
         }
+
+        // 找到与这个 BEGIN:VTODO 匹配的 END:VTODO（考虑嵌套层级）。
+        int depth = 0;
+        int end = -1;
+        for (int i = start; i < source.Count; i++)
+        {
+            var name = PropertyName(source[i]);
+            if (name == "BEGIN") depth++;
+            else if (name == "END")
+            {
+                depth--;
+                if (depth == 0) { end = i; break; }
+            }
+        }
+        if (end < 0) end = source.Count - 1;
+
+        // 构建：保留 VTODO 外层 + 保留 VTODO 内非受管属性（含子组件），
+        // 只删除 VTODO 直属层的受管属性，然后插入新的受管属性行。
+        var lines = new List<string>();
+        for (int i = 0; i <= start; i++) lines.Add(source[i]);
+
+        int curDepth = 0;
+        for (int i = start + 1; i < end; i++)
+        {
+            var name = PropertyName(source[i]);
+            if (name == "BEGIN") { curDepth++; lines.Add(source[i]); continue; }
+            if (name == "END") { curDepth--; lines.Add(source[i]); continue; }
+            // 只删除 VTODO 直属层（depth==0）的受管属性；子组件中的同名属性保留。
+            if (curDepth == 0 && ManagedProps.Contains(name)) continue;
+            // DUE 也只在直属层处理，但保留原始参数。
+            if (curDepth == 0 && name == "DUE") continue;
+            lines.Add(source[i]);
+        }
+
+        lines.AddRange(BuildManagedLines(t, source, start, end));
+        lines.Add(source[end]);
+        for (int i = end + 1; i < source.Count; i++) lines.Add(source[i]);
         return string.Join("\r\n", FoldAll(lines)) + "\r\n";
     }
 
-    private static List<string> BuildManagedLines(TaskData t)
+    /// <summary>
+    /// 构建受管属性行。DUE 特殊处理：如果原始 ICS 中有 DUE 行，
+    /// 保留原始参数（如 ;VALUE=DATE 或 ;TZID=Asia/Tokyo），只更新值部分。
+    /// </summary>
+    private static List<string> BuildManagedLines(TaskData t, List<string> source, int vtodoStart, int vtodoEnd)
     {
         var now = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ", CultureInfo.InvariantCulture);
+
+        // 从原始 VTODO 直属层提取 DUE 行的参数部分。
+        string dueParams = ExtractOriginalDueParams(source, vtodoStart, vtodoEnd);
+
         var lines = new List<string>
         {
             "UID:" + t.Uid,
@@ -375,28 +483,81 @@ public class CalDAVService : IDisposable
         if (t.Priority > 0) lines.Add("PRIORITY:" + Math.Clamp(t.Priority, 1, 9));
         if (t.CreatedAt.HasValue) lines.Add("CREATED:" + FormatIcalDate(t.CreatedAt.Value));
         if (t.CompletedAt.HasValue) lines.Add("COMPLETED:" + FormatIcalDate(t.CompletedAt.Value));
-        if (t.DueDate.HasValue) lines.Add("DUE:" + FormatIcalDate(t.DueDate.Value));
+        if (t.DueDate.HasValue)
+        {
+            // 保留原始参数：VALUE=DATE → 全天日期格式；TZID → 本地时间带时区标记；无参数 → UTC。
+            if (dueParams.Contains("VALUE=DATE", StringComparison.OrdinalIgnoreCase))
+                lines.Add("DUE;VALUE=DATE:" + t.DueDate.Value.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+            else if (dueParams.Contains("TZID=", StringComparison.OrdinalIgnoreCase))
+                lines.Add(dueParams + ":" + t.DueDate.Value.ToString("yyyyMMddTHHmmss", CultureInfo.InvariantCulture));
+            else
+                lines.Add("DUE:" + FormatIcalDate(t.DueDate.Value));
+        }
         return lines;
+    }
+
+    /// <summary>从原始 VTODO 直属层提取 DUE 行的参数部分（如 ;TZID=Asia/Tokyo 或 ;VALUE=DATE）。</summary>
+    private static string ExtractOriginalDueParams(List<string> source, int vtodoStart, int vtodoEnd)
+    {
+        if (vtodoStart < 0) return "";
+        int depth = 0;
+        int scanEnd = vtodoEnd >= 0 ? vtodoEnd : source.Count;
+        for (int i = vtodoStart + 1; i < scanEnd; i++)
+        {
+            var name = PropertyName(source[i]);
+            if (name == "BEGIN") { depth++; continue; }
+            if (name == "END") { depth--; continue; }
+            if (depth == 0 && name == "DUE")
+            {
+                var idx = source[i].IndexOf(':');
+                if (idx < 0) return "";
+                var head = source[i][..idx];
+                // head 格式如 "DUE;TZID=Asia/Tokyo" 或 "DUE;VALUE=DATE"
+                var semi = head.IndexOf(';');
+                if (semi >= 0) return head[semi..]; // 返回 ";TZID=Asia/Tokyo"
+                return "";
+            }
+        }
+        return "";
     }
 
     private static TaskData? ParseVTodo(string ical)
     {
         if (string.IsNullOrWhiteSpace(ical)) return null;
         var lines = UnfoldLines(ical);
-        int start = lines.FindIndex(l => PropertyName(l) == "BEGIN" &&
-                                          PropertyValue(l).Equals("VTODO", StringComparison.OrdinalIgnoreCase));
-        int end = lines.FindLastIndex(l => PropertyName(l) == "END" &&
-                                            PropertyValue(l).Equals("VTODO", StringComparison.OrdinalIgnoreCase));
-        if (start < 0 || end <= start) return null;
 
+        // 只匹配第一个 BEGIN:VTODO，并用嵌套层级找到配对的 END:VTODO。
+        int start = lines.FindIndex(l => PropertyName(l) == "BEGIN" &&
+                                         PropertyValue(l).Equals("VTODO", StringComparison.OrdinalIgnoreCase));
+        if (start < 0) return null;
+
+        int depth = 0;
+        int end = -1;
+        for (int i = start; i < lines.Count; i++)
+        {
+            var name = PropertyName(lines[i]);
+            if (name == "BEGIN") depth++;
+            else if (name == "END")
+            {
+                depth--;
+                if (depth == 0) { end = i; break; }
+            }
+        }
+        if (end < 0) return null;
+
+        // 只解析 VTODO 直属属性（depth==0），跳过 VALARM 等子组件。
         var props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        int curDepth = 0;
         for (int i = start + 1; i < end; i++)
         {
             var name = PropertyName(lines[i]);
-            if (name.Length == 0) continue;
-            props[name] = Unescape(PropertyValue(lines[i]));
+            if (name == "BEGIN") { curDepth++; continue; }
+            if (name == "END") { curDepth--; continue; }
+            if (curDepth == 0 && name.Length > 0)
+                props[name] = Unescape(PropertyValue(lines[i]));
         }
 
+        // 保留原始 STATUS：COMPLETED / IN-PROCESS / CANCELLED / NEEDS-ACTION
         var status = props.GetValueOrDefault("STATUS") ?? "";
         var percent = props.GetValueOrDefault("PERCENT-COMPLETE") ?? "0";
         bool completed = status.Equals("COMPLETED", StringComparison.OrdinalIgnoreCase) || percent == "100";

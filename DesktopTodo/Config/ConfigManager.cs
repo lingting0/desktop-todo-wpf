@@ -57,6 +57,10 @@ public class AppConfig
     [JsonPropertyName("proxy_url")]
     public string ProxyUrl { get; set; } = "";
 
+    /// <summary>用户已确认允许 HTTP 明文传输凭据的来源（host:port）。</summary>
+    [JsonPropertyName("allow_insecure_http")]
+    public bool AllowInsecureHttp { get; set; }
+
     // ── 自动更新：全部是本机偏好，不进入仓库 ──
 
     /// <summary>是否允许后台检查更新；关掉后只能从托盘手动检查。</summary>
@@ -119,6 +123,7 @@ public static class ConfigManager
                 cfg.LegacyAppPassword = null;
                 WriteJson(cfg);
             }
+            // 迁移失败时保留 LegacyAppPassword，下次启动再试。
         }
 
         cfg.AppPassword = CredentialStore.Load(target) ?? "";
@@ -130,19 +135,27 @@ public static class ConfigManager
         Normalize(cfg);
         var target = CredentialStore.BuildTarget(cfg.NextcloudUrl, cfg.Username);
         if (!string.IsNullOrEmpty(cfg.AppPassword))
-            CredentialStore.Save(target, cfg.Username, cfg.AppPassword);
+        {
+            if (!CredentialStore.Save(target, cfg.Username, cfg.AppPassword))
+                throw new IOException("密码未能保存到 Windows 凭据管理器，请重试");
+        }
+        // 只有凭据写入成功（或本来就没有密码）才能清除旧字段。
         cfg.LegacyAppPassword = null;
         WriteJson(cfg);
     }
 
     /// <summary>
-    /// 只持久化更新偏好，不触碰凭据管理器。自动检查失败也不应写坏配置。
+    /// 只持久化更新偏好，不触碰凭据管理器。
+    /// 如果旧密码迁移尚未完成（LegacyAppPassword 非空），不覆盖配置，
+    /// 避免把唯一密码副本写丢。
     /// </summary>
     public static void SaveUpdateState(AppConfig cfg)
     {
         try
         {
-            cfg.LegacyAppPassword = null;
+            // 迁移未完成时不覆盖配置文件，防止丢失唯一的旧密码副本。
+            if (!string.IsNullOrEmpty(cfg.LegacyAppPassword))
+                return;
             WriteJson(cfg);
         }
         catch { /* 更新状态写盘失败不影响更新检测 */ }
@@ -150,21 +163,26 @@ public static class ConfigManager
 
     public static void Normalize(AppConfig cfg)
     {
-        if (cfg.SyncIntervalSeconds < 30 || cfg.SyncIntervalSeconds > 86400)
-            cfg.SyncIntervalSeconds = 300;
-        if (cfg.CardWidth < 260) cfg.CardWidth = 380;
-        if (cfg.CardHeight < 200) cfg.CardHeight = 500;
-        if (cfg.SnapDistance < 0 || cfg.SnapDistance > 100) cfg.SnapDistance = 15;
+        cfg.NextcloudUrl = (cfg.NextcloudUrl ?? "").Trim();
+        cfg.Username = (cfg.Username ?? "").Trim();
+        cfg.CalendarName ??= "";
+        cfg.Theme = string.IsNullOrWhiteSpace(cfg.Theme) ? "暗黑" : cfg.Theme.Trim();
         cfg.CertificateThumbprint = (cfg.CertificateThumbprint ?? "")
             .Replace(":", "").Replace(" ", "").Trim();
-        if (cfg.UpdateLastCheckUnix < 0) cfg.UpdateLastCheckUnix = 0;
-        if (cfg.UpdateSnoozeUntilUnix < 0) cfg.UpdateSnoozeUntilUnix = 0;
+        cfg.ProxyUrl = (cfg.ProxyUrl ?? "").Trim();
         cfg.UpdateIgnoredVersion ??= "";
         cfg.UpdateNotifiedVersion ??= "";
-        cfg.ProxyUrl = (cfg.ProxyUrl ?? "").Trim();
+
+        if (cfg.SyncIntervalSeconds < 30 || cfg.SyncIntervalSeconds > 86400)
+            cfg.SyncIntervalSeconds = 300;
+        cfg.CardWidth = Math.Clamp(cfg.CardWidth, 260, 1600);
+        cfg.CardHeight = Math.Clamp(cfg.CardHeight, 200, 1600);
+        if (cfg.SnapDistance < 0 || cfg.SnapDistance > 100) cfg.SnapDistance = 15;
+        if (cfg.UpdateLastCheckUnix < 0) cfg.UpdateLastCheckUnix = 0;
+        if (cfg.UpdateSnoozeUntilUnix < 0) cfg.UpdateSnoozeUntilUnix = 0;
     }
 
-    /// <summary>连接前校验，返回错误说明；无错误返回 null。</summary>
+    /// <summary>连接前校验，返回错误说明；无错误返回 null；有警告返回 "警告:..."。</summary>
     public static string? ValidateForConnection(AppConfig cfg)
     {
         if (!Uri.TryCreate(cfg.NextcloudUrl, UriKind.Absolute, out var uri) ||
@@ -172,17 +190,23 @@ public static class ConfigManager
             return "Nextcloud URL 不是合法的 http/https 地址";
         if (string.IsNullOrWhiteSpace(cfg.Username)) return "用户名不能为空";
         if (string.IsNullOrWhiteSpace(cfg.AppPassword)) return "应用密码不能为空";
-        if (uri.Scheme == Uri.UriSchemeHttp) return "警告：当前使用 http，凭据将以明文传输，建议改用 https";
+        if (uri.Scheme == Uri.UriSchemeHttp && !cfg.AllowInsecureHttp)
+            return "警告：当前使用 http，凭据将以明文传输，建议改用 https。如确需使用 http，请先点击确认。";
         return null;
     }
 
+    private static readonly object WriteLock = new();
+
     private static void WriteJson(AppConfig cfg)
     {
-        var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
-        var tmp = ConfigPath + ".tmp";
-        // 原子写入：避免崩溃/断电写坏配置。
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, ConfigPath, true);
+        lock (WriteLock)
+        {
+            var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
+            // 使用唯一临时文件名，避免多实例冲突。
+            var tmp = ConfigPath + "." + Environment.CurrentManagedThreadId + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, ConfigPath, true);
+        }
     }
 
     private static void TryQuarantineBrokenConfig()

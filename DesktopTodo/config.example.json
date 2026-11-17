@@ -12,6 +12,7 @@
   "theme": "暗黑",
   "auto_start": false,
   "proxy_url": "",
+  "allow_insecure_http": false,
   "update_check_enabled": true,
   "update_last_check_unix": 0,
   "update_snooze_until_unix": 0,

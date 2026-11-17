@@ -19,11 +19,34 @@ public class TaskManager
 
     public TaskManager(CalDAVService sync) => _sync = sync;
 
-    /// <summary>保存设置后换上新的同步实例；集合对象不变，UI 绑定无需重建。</summary>
+    /// <summary>
+    /// 保存设置后换上新的同步实例：清空旧任务和删除记录，
+    /// 避免旧任务的 Href/ETag 被发到新日历。
+    /// 调用方应先连接新服务并成功读取任务，再调用此方法。
+    /// </summary>
     public void ReplaceSync(CalDAVService sync)
     {
         _sync = sync;
         _online = true;
+        _deletedUids.Clear();
+        Tasks.Clear();
+    }
+
+    /// <summary>定时和手动同步入口：未连接时自动重新连接。</summary>
+    public async Task SyncAsync()
+    {
+        try
+        {
+            // 未连接时尝试重新连接（首次连接失败后可恢复）。
+            if (!_online)
+                await _sync.ConnectAsync();
+            await LoadFromRemoteAsync();
+        }
+        catch (Exception ex)
+        {
+            _online = false;
+            StatusChanged?.Invoke(this, $"同步失败: {ex.Message}");
+        }
     }
 
     public async Task LoadFromRemoteAsync()

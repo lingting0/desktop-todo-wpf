@@ -10,7 +10,7 @@
     <AssemblyName>DesktopTodo</AssemblyName>
     <RootNamespace>DesktopTodo</RootNamespace>
     <!-- 自动更新用：与 GitHub Release 的 tag vX.Y.Z 对应，发版时递增。 -->
-    <Version>1.1.1</Version>
+    <Version>1.2.0</Version>
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

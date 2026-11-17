@@ -92,7 +92,8 @@ internal static class CredentialStore
         {
             Marshal.FreeHGlobal(targetPtr);
             Marshal.FreeHGlobal(userPtr);
-            Marshal.FreeHGlobal(blobPtr);
+            // 安全清零后释放，避免密码残留在非托管内存中。
+            Marshal.ZeroFreeGlobalAllocUnicode(blobPtr);
         }
     }
 

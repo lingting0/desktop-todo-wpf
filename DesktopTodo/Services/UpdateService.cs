@@ -29,7 +29,7 @@ public sealed class UpdateInfo
 /// 检查 / 下载 / 校验更新包。只读取本仓库的公开 Release，不接触任何用户数据。
 /// 网络失败由调用方决定如何提示（自动检查时完全静默）。
 /// </summary>
-public sealed class UpdateService
+public sealed class UpdateService : IDisposable
 {
     private const string Owner = "lingting0";
     private const string Repo = "desktop-todo-wpf";
@@ -125,8 +125,8 @@ public sealed class UpdateService
             }
         }
 
-        // 没有可安装的资产时不打扰用户。
-        if (zipUrl == null) return null;
+        // 没有 zip 或校验文件时不安装。
+        if (zipUrl == null || checksumUrl == null) return null;
 
         return new UpdateInfo
         {
@@ -144,6 +144,11 @@ public sealed class UpdateService
     public async Task<string> PrepareAsync(UpdateInfo info, IProgress<string> progress,
                                            CancellationToken ct = default)
     {
+        // 重新验证资产来源（不只是发现阶段检查）。
+        if (!IsAllowedUrl(info.DownloadUrl) || string.IsNullOrEmpty(info.ChecksumUrl) ||
+            !IsAllowedUrl(info.ChecksumUrl))
+            throw new InvalidDataException("更新资产来源或校验信息不完整，已取消");
+
         // 安全护栏：无论「当前版本」是否被演练参数伪装，都不允许降级到更旧的程序。
         var real = Normalize(Assembly.GetEntryAssembly()?.GetName().Version ?? new Version(1, 0, 0));
         var target = ParseTag(info.Tag);
@@ -151,21 +156,23 @@ public sealed class UpdateService
             throw new InvalidOperationException(
                 $"拒绝降级：更新包 v{target.ToString(3)} 低于当前程序 v{real.ToString(3)}");
 
-        var dir = Path.Combine(UpdatesRoot, Sanitize(info.Tag));
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
-        catch { /* 旧暂存目录清不掉就复用，不阻断 */ }
+        var dir = Path.Combine(UpdatesRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
 
         var zipPath = Path.Combine(dir, "package.zip");
-        await DownloadAsync(info.DownloadUrl, zipPath, info.Size, progress, ct);
+        // 下载使用独立超时，避免网络卡住时无限等待。
+        using var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        downloadCts.CancelAfter(TimeSpan.FromMinutes(5));
+        await DownloadAsync(info.DownloadUrl, zipPath, info.Size, progress, downloadCts.Token);
 
         progress.Report("正在校验更新包...");
-        if (!string.IsNullOrEmpty(info.ChecksumUrl))
-            await VerifyChecksumAsync(info.ChecksumUrl!, zipPath, ct);
+        // 校验文件必须存在且通过验证，否则拒绝安装。
+        await VerifyChecksumAsync(info.ChecksumUrl!, zipPath, downloadCts.Token);
 
         var staged = Path.Combine(dir, "staged");
         Directory.CreateDirectory(staged);
-        ExtractSafe(zipPath, staged);
+        // 解压在后台线程执行，避免卡住 UI 线程。
+        await Task.Run(() => ExtractSafe(zipPath, staged), downloadCts.Token);
 
         foreach (var f in RequiredFiles)
             if (!File.Exists(Path.Combine(staged, f)))
@@ -178,8 +185,9 @@ public sealed class UpdateService
         return staged;
     }
 
-    /// <summary>
-    /// 从「暂存目录里的新 exe」启动更新器。这样更新器占用的是 staged 的文件，
+    public void Dispose() => _http.Dispose();
+
+    /// <summary>这样更新器占用的是 staged 的文件，
     /// 目标目录中的 DesktopTodo.exe 才能被正常覆盖。
     /// </summary>
     public static bool StartUpdater(string stagedDir, int pid, bool noLaunch = false)
@@ -292,11 +300,13 @@ public sealed class UpdateService
         var dash = s.IndexOf('-');
         if (dash >= 0) s = s[..dash]; // 去掉 -beta / -rc 之类后缀
         var parts = s.Split('.');
-        if (parts.Length < 2 || parts.Length > 4) return null;
-        if (!int.TryParse(parts[0], out var maj) || !int.TryParse(parts[1], out var min))
-            return null;
+        if (parts.Length < 2 || parts.Length > 3) return null;
+        if (!int.TryParse(parts[0], out var maj) || !int.TryParse(parts[1], out var min)) return null;
         int build = 0;
-        if (parts.Length >= 3) int.TryParse(parts[2], out build);
+        if (parts.Length == 3)
+        {
+            if (!int.TryParse(parts[2], out build)) return null; // 严格：第三段非数字则拒绝
+        }
         return new Version(maj, min, Math.Max(0, build));
     }
 
