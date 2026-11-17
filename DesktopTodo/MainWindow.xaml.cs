@@ -402,7 +402,7 @@ public partial class MainWindow : Window
         _trayUpdateItem.Click += (_, _) => ShowUpdateDialog();
         tray.ContextMenuStrip.Items.Add(_trayUpdateItem);
         tray.ContextMenuStrip.Items.Add(new System.Windows.Forms.ToolStripSeparator());
-        tray.ContextMenuStrip.Items.Add("反馈与建议", null, (_, _) => FeedbackBtn_Click());
+        tray.ContextMenuStrip.Items.Add("反馈与建议", null, (_, _) => ShowFeedback());
         tray.ContextMenuStrip.Items.Add("退出", null, (_, _) => ExitApplication());
         tray.DoubleClick += (_, _) => { Show(); Activate(); };
         return tray;
@@ -444,21 +444,75 @@ public partial class MainWindow : Window
     private void MinBtn_Click(object s, RoutedEventArgs e) => Hide();
     private void CloseBtn_Click(object s, RoutedEventArgs e) => Hide();
 
-    /// <summary>反馈与建议：打开默认邮件客户端，预填收件人。</summary>
-    private void FeedbackBtn_Click()
+    /// <summary>反馈与建议：弹窗显示邮箱，点按钮复制到剪贴板。</summary>
+    private void ShowFeedback()
     {
-        try
+        const string email = "llingting0@qq.com";
+        var dlg = new Window
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            Title = "反馈与建议",
+            Width = 360,
+            Height = 180,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            WindowStyle = WindowStyle.ToolWindow,
+            ResizeMode = ResizeMode.NoResize,
+            Owner = this
+        };
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(new TextBlock
+        {
+            Text = "遇到 bug 或有建议，欢迎邮件联系：",
+            FontSize = 13,
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+        var emailRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 12) };
+        var emailText = new TextBlock
+        {
+            Text = email,
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        emailRow.Children.Add(emailText);
+        var copyBtn = new Button
+        {
+            Content = "复制",
+            Width = 60,
+            Height = 26,
+            Margin = new Thickness(8, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var copiedLabel = new TextBlock
+        {
+            Text = "已复制",
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x1e, 0x8e, 0x3e)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 0, 0),
+            Visibility = Visibility.Collapsed
+        };
+        copyBtn.Click += (_, _) =>
+        {
+            try
             {
-                FileName = "mailto:llingting0@qq.com?subject=Desktop%20Todo%20%E5%8F%8D%E9%A6%88",
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
+                Clipboard.SetText(email);
+                copiedLabel.Visibility = Visibility.Visible;
+            }
+            catch { /* 剪贴板被占用不阻断 */ }
+        };
+        emailRow.Children.Add(copyBtn);
+        emailRow.Children.Add(copiedLabel);
+        sp.Children.Add(emailRow);
+        var closeBtn = new Button
         {
-            StatusLabel.Text = "无法打开邮件客户端：" + ex.Message + "（请手动发到 llingting0@qq.com）";
-        }
+            Content = "关闭",
+            Width = 70,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        closeBtn.Click += (_, _) => dlg.Close();
+        sp.Children.Add(closeBtn);
+        dlg.Content = sp;
+        dlg.ShowDialog();
     }
 
     // ── Drag + Snap ──
