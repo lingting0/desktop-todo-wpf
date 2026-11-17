@@ -247,4 +247,4 @@ python make-release.py
 
 ## License
 
-完全开源，采用 **MIT**。`LICENSE` 文件与版权署名待确认后补充。
+完全开源，采用 **MIT** 许可证。详见 [LICENSE](LICENSE)。
