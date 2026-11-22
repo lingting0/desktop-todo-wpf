@@ -33,6 +33,7 @@ ALLOWED_HOSTS = {
     "github.com", "api.github.com", "raw.githubusercontent.com",
     "dotnet.microsoft.com", "microsoft.com", "schemas.microsoft.com",
     "example.com", "w3.org", "localhost", "127.0.0.1",
+    "aka.ms",  # .NET apphost 模板自带短链接
 }
 
 PATTERNS = [
