@@ -9,7 +9,7 @@ namespace DesktopTodo.Services;
 
 public class TaskManager
 {
-    private CalDAVService _sync;
+    private readonly ITaskStore _sync;
     private readonly HashSet<string> _deletedUids = new();
     private bool _online = true;
 
@@ -17,20 +17,7 @@ public class TaskManager
     public event EventHandler<string>? StatusChanged;
     public bool IsOnline => _online;
 
-    public TaskManager(CalDAVService sync) => _sync = sync;
-
-    /// <summary>
-    /// 保存设置后换上新的同步实例：清空旧任务和删除记录，
-    /// 避免旧任务的 Href/ETag 被发到新日历。
-    /// 调用方应先连接新服务并成功读取任务，再调用此方法。
-    /// </summary>
-    public void ReplaceSync(CalDAVService sync)
-    {
-        _sync = sync;
-        _online = true;
-        _deletedUids.Clear();
-        Tasks.Clear();
-    }
+    public TaskManager(ITaskStore sync) => _sync = sync;
 
     /// <summary>定时和手动同步入口：未连接时自动重新连接。</summary>
     public async Task SyncAsync()
@@ -58,7 +45,8 @@ public class TaskManager
             Tasks.Clear();
             foreach (var t in remote.Where(t => !_deletedUids.Contains(t.Uid)))
                 Tasks.Add(t);
-            StatusChanged?.Invoke(this, $"已同步 {Tasks.Count} 个任务 (日历: {_sync.CalendarName})");
+            StatusChanged?.Invoke(this, _sync is LocalTaskStore ? "本机清单 · 自动保存" :
+                $"已同步 {Tasks.Count} 个任务 (日历: {_sync.CalendarName})");
         }
         catch (Exception ex)
         {
@@ -85,9 +73,10 @@ public class TaskManager
     public async Task ToggleCompleteAsync(TaskData task)
     {
         // XAML 使用 CheckBox.Click（仅用户点击触发），绑定初始化不会再反向写回服务器。
+        var oldDate = task.CompletedAt;
         task.CompletedAt = task.Completed ? DateTime.Now : null;
-        await UpdateAsync(task);
-        // 失败时不回滚 UI 状态，下次成功同步会用服务端数据覆盖并给出提示。
+        try { await UpdateAsync(task); }
+        catch { task.Completed = !task.Completed; task.CompletedAt = oldDate; throw; }
     }
 
     public async Task DeleteAsync(TaskData task)

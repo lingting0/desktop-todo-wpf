@@ -1,0 +1,60 @@
+<UserControl x:Class="DesktopTodo.Themes.SkinPicker"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Width="242" FontFamily="Microsoft YaHei UI" Foreground="#213A32" KeyboardNavigation.TabNavigation="Cycle">
+    <Border Margin="3" Background="#FCFEFC" BorderBrush="#B7CDC2" BorderThickness="1" CornerRadius="15" Padding="14">
+        <StackPanel>
+            <TextBlock Text="卡片外观" FontSize="15" FontWeight="SemiBold" Margin="2,0,0,9"/>
+            <ListBox x:Name="Choices" Background="Transparent" BorderThickness="0"
+                     AutomationProperties.Name="皮肤" SelectionChanged="SelectSkin">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Fill="{Binding Swatch}" Stroke="#30777777" Width="12" Height="12" Margin="0,0,6,0"/>
+                            <TextBlock Text="{Binding Name}"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <Border x:Name="Tile" CornerRadius="8" BorderThickness="1" BorderBrush="Transparent"
+                                            Margin="1,2" Padding="6,8" Background="#F2F5F2"><ContentPresenter/></Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsSelected" Value="True"><Setter TargetName="Tile" Property="Background" Value="#DDEFE5"/><Setter TargetName="Tile" Property="BorderBrush" Value="#57927B"/></Trigger>
+                                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Tile" Property="BorderBrush" Value="#254F42"/></Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+            </ListBox>
+            <Expander x:Name="FontSection" Margin="2,8,2,0" AutomationProperties.Name="选择卡片字体">
+                <Expander.Header>
+                    <TextBlock x:Name="FontCaption" MaxWidth="175" TextTrimming="CharacterEllipsis"/>
+                </Expander.Header>
+                <ListBox x:Name="FontList" Margin="0,5,0,0" Height="140" BorderBrush="#B7CDC2"
+                         DisplayMemberPath="Label" SelectedValuePath="Id" TextSearch.TextPath="Label"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="系统字体"
+                         SelectionChanged="SelectFont"/>
+            </Expander>
+            <StackPanel Margin="2,10,2,0">
+                <DockPanel><TextBlock Text="背景不透明度"/><TextBlock HorizontalAlignment="Right"
+                    Text="{Binding ElementName=OpacitySlider, Path=Value, StringFormat={}{0:F0}%}"/></DockPanel>
+                <Slider x:Name="OpacitySlider" Minimum="25" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
+                        IsMoveToPointEnabled="True"
+                        AutomationProperties.Name="背景不透明度" Margin="0,5,0,0" ValueChanged="ChangeOpacity"/>
+                <TextBlock Text="所有皮肤共用，换肤时保持当前数值" FontSize="11" Foreground="#526A61"/>
+            </StackPanel>
+            <Button x:Name="ColorButton" Content="打开调色盘…" Margin="2,9,2,0" Padding="6,4" Width="Auto"
+                    ToolTip="自定义纯色背景" Visibility="Collapsed" Click="ChooseColor"/>
+        </StackPanel>
+    </Border>
+</UserControl>

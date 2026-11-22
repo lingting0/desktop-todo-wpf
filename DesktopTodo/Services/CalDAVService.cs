@@ -15,7 +15,7 @@ using DesktopTodo.Models;
 
 namespace DesktopTodo.Services;
 
-public class CalDAVService : IDisposable
+public class CalDAVService : ITaskStore
 {
     private readonly HttpClient _http;
     private readonly string _baseUrl;

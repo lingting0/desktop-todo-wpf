@@ -1,11 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace DesktopTodo.Config;
 
-public class AppConfig
+public class AppConfig : IJsonOnDeserialized
 {
     [JsonPropertyName("nextcloud_url")]
     public string NextcloudUrl { get; set; } = "https://your-server.example.com/remote.php/dav/";
@@ -48,7 +49,50 @@ public class AppConfig
     public int SnapDistance { get; set; } = 15;
 
     [JsonPropertyName("theme")]
-    public string Theme { get; set; } = "暗黑";
+    public string Theme { get; set; } = "松墨工坊";
+
+    private int? backgroundOpacity;
+
+    [JsonPropertyName("background_opacity")]
+    public int BackgroundOpacity
+    {
+        get => backgroundOpacity ?? 100;
+        set => backgroundOpacity = Math.Clamp(value, 25, 100);
+    }
+
+    [JsonInclude, JsonPropertyName("glass_opacity"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private int? LegacyGlassOpacity { get; set; }
+
+    [JsonInclude, JsonPropertyName("theme_opacities"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private Dictionary<string, int>? LegacyThemeOpacities { get; set; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (!backgroundOpacity.HasValue)
+        {
+            var oldTheme = Themes.CardTheme.Canonical(Theme?.Trim() ?? "");
+            BackgroundOpacity = oldTheme == "雾海玻璃"
+                ? LegacyGlassOpacity ?? 76
+                : LegacyThemeOpacities?.GetValueOrDefault(oldTheme, 100) ?? 100;
+        }
+        LegacyGlassOpacity = null;
+        LegacyThemeOpacities = null;
+    }
+
+    [JsonPropertyName("font_family")]
+    public string FontFamilyName { get; set; } = "";
+
+    [JsonPropertyName("window_layer")]
+    public string WindowLayer { get; set; } = "desktop";
+
+    [JsonPropertyName("solid_color")]
+    public string SolidColor { get; set; } = "#DCEBE5";
+
+    [JsonPropertyName("local_only")]
+    public bool? LocalOnly { get; set; }
+
+    [JsonIgnore]
+    public bool UsesLocalStore => LocalOnly ?? string.IsNullOrWhiteSpace(Username);
 
     [JsonPropertyName("auto_start")]
     public bool AutoStart { get; set; }
@@ -161,12 +205,24 @@ public static class ConfigManager
         catch { /* 更新状态写盘失败不影响更新检测 */ }
     }
 
+    public static void SavePreferences(AppConfig cfg)
+    {
+        if (!string.IsNullOrEmpty(cfg.LegacyAppPassword))
+            throw new IOException("旧密码尚未迁移到凭据管理器");
+        WriteJson(cfg);
+    }
+
     public static void Normalize(AppConfig cfg)
     {
         cfg.NextcloudUrl = (cfg.NextcloudUrl ?? "").Trim();
         cfg.Username = (cfg.Username ?? "").Trim();
         cfg.CalendarName ??= "";
-        cfg.Theme = string.IsNullOrWhiteSpace(cfg.Theme) ? "暗黑" : cfg.Theme.Trim();
+        cfg.Theme = string.IsNullOrWhiteSpace(cfg.Theme) ? "松墨工坊" : cfg.Theme.Trim();
+        if (cfg.WindowLayer is not ("desktop" or "normal" or "top")) cfg.WindowLayer = "desktop";
+        if (cfg.SolidColor?.Length != 7 || cfg.SolidColor[0] != '#' ||
+            !int.TryParse(cfg.SolidColor.AsSpan(1), System.Globalization.NumberStyles.AllowHexSpecifier,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            cfg.SolidColor = "#DCEBE5";
         cfg.CertificateThumbprint = (cfg.CertificateThumbprint ?? "")
             .Replace(":", "").Replace(" ", "").Trim();
         cfg.ProxyUrl = (cfg.ProxyUrl ?? "").Trim();

@@ -12,6 +12,7 @@ using System.Windows.Threading;
 using DesktopTodo.Config;
 using DesktopTodo.Models;
 using DesktopTodo.Services;
+using DesktopTodo.Themes;
 using Microsoft.Win32;
 
 namespace DesktopTodo;
@@ -28,17 +29,17 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
-    private readonly AppConfig _cfg;
-    private CalDAVService _sync;
-    private readonly TaskManager _mgr;
+    private AppConfig _cfg;
+    private ITaskStore _sync;
+    private TaskManager _mgr;
     private readonly System.Windows.Forms.NotifyIcon _tray;
-    private readonly System.Windows.Data.ListCollectionView _taskView;
+    private System.Windows.Data.ListCollectionView _taskView;
 
     private DispatcherTimer? _timer;
     private bool _syncing;
     private bool _exiting;
     private bool _cleaned;
-    private bool _pinned = true;
+    private DesktopWidgetLayer? _desktopLayer;
     private bool _showCompleted;
     private bool _dragging;
 
@@ -51,15 +52,6 @@ public partial class MainWindow : Window
     private System.Windows.Forms.ToolStripMenuItem? _trayUpdateItem;
     private bool _updateChecking;
 
-    private static readonly Dictionary<string, (string card, string title)> Themes = new()
-    {
-        ["暗黑"] = ("#2a2a2a", "#363636"),
-        ["亮白"] = ("#ffffff", "#f0f0f0"),
-        ["深蓝"] = ("#1a2332", "#243447"),
-        ["墨绿"] = ("#1c2e1c", "#263a26"),
-        ["暗紫"] = ("#2a1f3d", "#362a4a"),
-    };
-
     public MainWindow()
     {
         InitializeComponent();
@@ -69,6 +61,7 @@ public partial class MainWindow : Window
             var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
             var style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
             SetWindowLongPtr(hwnd, GWL_STYLE, new IntPtr(style & ~WS_MAXIMIZEBOX));
+            ApplyLayer();
         };
         StateChanged += (_, _) => { if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal; };
 
@@ -77,10 +70,7 @@ public partial class MainWindow : Window
         _mgr = new TaskManager(_sync);
         _updateSvc = new UpdateService(_cfg.ProxyUrl);
 
-        _taskView = new System.Windows.Data.ListCollectionView(_mgr.Tasks)
-        {
-            Filter = o => _showCompleted || o is TaskData t && !t.Completed
-        };
+        _taskView = CreateView(_mgr);
         TaskList.ItemsSource = _taskView;
 
         Width = _cfg.CardWidth;
@@ -96,7 +86,7 @@ public partial class MainWindow : Window
 
         ApplyTheme(_cfg.Theme);
         _tray = SetupTray();
-        _mgr.StatusChanged += (_, msg) => Dispatcher.Invoke(() => StatusLabel.Text = msg);
+        _mgr.StatusChanged += OnTaskStatus;
 
         if (ConfigManager.LastLoadError != null)
             StatusLabel.Text = ConfigManager.LastLoadError;
@@ -133,6 +123,7 @@ public partial class MainWindow : Window
     {
         if (_cleaned) return;
         _cleaned = true;
+        _desktopLayer?.Dispose();
         _timer?.Stop();
         _updateTimer?.Stop();
         _updateCts.Cancel();
@@ -144,20 +135,27 @@ public partial class MainWindow : Window
         _sync?.Dispose();
     }
 
-    private static CalDAVService CreateSyncService(AppConfig cfg)
-        => new CalDAVService(cfg.NextcloudUrl, cfg.Username, cfg.AppPassword,
+    private System.Windows.Data.ListCollectionView CreateView(TaskManager manager) =>
+        new(manager.Tasks) { Filter = item => _showCompleted || item is TaskData task && !task.Completed };
+
+    private void OnTaskStatus(object? sender, string message) => StatusLabel.Text = message;
+
+    private static ITaskStore CreateSyncService(AppConfig cfg)
+        => cfg.UsesLocalStore ? new LocalTaskStore() : new CalDAVService(cfg.NextcloudUrl, cfg.Username, cfg.AppPassword,
                              cfg.CertificateThumbprint, cfg.CalendarName);
 
     // ── 连接 / 定时同步 ──
 
     private async Task<bool> ConnectAndLoadAsync()
     {
-        StatusLabel.Text = "正在连接 Nextcloud...";
+        var store = _sync;
+        var manager = _mgr;
+        StatusLabel.Text = store is LocalTaskStore ? "正在读取本机清单…" : "正在连接 Nextcloud...";
         try
         {
-            await _sync.ConnectAsync();
-            await _mgr.LoadFromRemoteAsync();
-            return _mgr.IsOnline;
+            await store.ConnectAsync();
+            await manager.LoadFromRemoteAsync();
+            return manager.IsOnline;
         }
         catch (Exception ex)
         {
@@ -169,6 +167,7 @@ public partial class MainWindow : Window
     private void RestartTimer()
     {
         _timer?.Stop();
+        if (_sync is LocalTaskStore) return;
         _timer = new DispatcherTimer
         {
             Interval = TimeSpan.FromSeconds(Math.Max(30, _cfg.SyncIntervalSeconds))
@@ -190,33 +189,36 @@ public partial class MainWindow : Window
     }
 
     /// <summary>保存设置后立刻重建同步服务与定时器，无需重启应用。</summary>
-    private async Task ApplySettingsAsync()
+    private async Task ApplySettingsAsync(AppConfig draft)
     {
-        _timer?.Stop();
-        // 等正在进行的同步收尾，避免释放仍在使用中的 HttpClient。
-        int guard = 0;
-        while (_syncing && guard++ < 100) await Task.Delay(50);
-
-        // 创建新服务实例，先连接+读取成功后再切换（原子会话切换）。
-        var candidate = CreateSyncService(_cfg);
-        List<TaskData>? initialTasks = null;
+        var candidate = CreateSyncService(draft);
+        List<TaskData> initialTasks;
+        UpdateService? updates = null;
         try
         {
             await candidate.ConnectAsync();
             initialTasks = await candidate.FetchAllAsync();
+            updates = new UpdateService(draft.ProxyUrl);
+            if (draft.UsesLocalStore) ConfigManager.SavePreferences(draft);
+            else ConfigManager.Save(draft);
         }
         catch (Exception ex)
         {
             candidate.Dispose();
-            StatusLabel.Text = "设置已应用，但连接失败 — " + ex.Message + "（旧任务保留，请检查配置后重试）";
-            RestartTimer();
+            updates?.Dispose();
+            StatusLabel.Text = "设置未应用：" + ex.Message;
             return;
         }
 
         // 连接+读取成功，原子切换。
         var old = _sync;
+        _cfg = draft;
         _sync = candidate;
-        _mgr.ReplaceSync(_sync);
+        _mgr.StatusChanged -= OnTaskStatus;
+        _mgr = new TaskManager(candidate);
+        _mgr.StatusChanged += OnTaskStatus;
+        _taskView = CreateView(_mgr);
+        TaskList.ItemsSource = _taskView;
         old.Dispose();
 
         // 把刚读到的任务直接灌入，不用再 FetchAll 一次。
@@ -226,14 +228,14 @@ public partial class MainWindow : Window
         StatusLabel.Text = $"已同步 {_mgr.Tasks.Count} 个任务 (日历: {_sync.CalendarName})";
 
         // 代理设置变了也要重建更新服务
-        _updateSvc = new UpdateService(_cfg.ProxyUrl);
+        _updateSvc.Dispose();
+        _updateSvc = updates;
 
-        ApplyTheme(_cfg.Theme);
         Width = _cfg.CardWidth;
         Height = _cfg.CardHeight;
 
         RestartTimer();
-        StatusLabel.Text = "设置已生效（无需重启）— 日历：" + _sync.CalendarName;
+        StatusLabel.Text = _cfg.UsesLocalStore ? "本机清单 · 自动保存" : "设置已生效 — 日历：" + _sync.CalendarName;
     }
 
     // ── 自动更新 ──
@@ -386,16 +388,9 @@ public partial class MainWindow : Window
 
     private void ApplyTheme(string name)
     {
-        if (!Themes.TryGetValue(name, out var t)) t = Themes["暗黑"];
-        Resources["CardBg"] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(t.card));
-        Resources["TitleBg"] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(t.title));
-        bool isLight = name == "亮白";
-        var textColor = isLight ? "#333333" : "#e0e0e0";
-        var borderColor = isLight ? "#cccccc" : "#444444";
-        var inputBg = isLight ? "#f5f5f5" : "#1a1a1a";
-        Resources["TextColor"] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(textColor));
-        Resources["BorderColor"] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(borderColor));
-        Resources["InputBg"] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(inputBg));
+        name = CardTheme.Canonical(name);
+        var palette = name == "素色画布" ? CardTheme.Solid(_cfg.SolidColor) : CardTheme.All[name];
+        palette.WithOpacity(_cfg.BackgroundOpacity).Apply(Resources, _cfg.FontFamilyName);
         _cfg.Theme = name;
     }
 
@@ -443,10 +438,31 @@ public partial class MainWindow : Window
 
     private void PinBtn_Click(object s, RoutedEventArgs e)
     {
-        _pinned = !_pinned;
-        Topmost = _pinned;
-        PinBtn.Content = _pinned ? "◆" : "◇";
-        PinBtn.ToolTip = _pinned ? "已置顶 — 点击取消" : "未置顶 — 点击置顶";
+        var menu = new ContextMenu { PlacementTarget = PinBtn, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        foreach (var (mode, label) in new[] { ("desktop", "桌面小工具"), ("normal", "普通窗口"), ("top", "始终置顶") })
+        {
+            var item = new MenuItem { Header = label, IsCheckable = true, IsChecked = _cfg.WindowLayer == mode };
+            item.Click += (_, _) => { _cfg.WindowLayer = mode; ApplyLayer(); SaveAppearance(); };
+            menu.Items.Add(item);
+        }
+        menu.IsOpen = true;
+    }
+
+    private void SaveAppearance()
+    {
+        try { ConfigManager.SavePreferences(_cfg); }
+        catch (Exception ex) { StatusLabel.Text = "外观已调整，但未保存：" + ex.Message; }
+    }
+
+    private void ApplyLayer()
+    {
+        _desktopLayer?.Dispose();
+        _desktopLayer = null;
+        Topmost = _cfg.WindowLayer == "top";
+        if (_cfg.WindowLayer == "desktop")
+            _desktopLayer = new DesktopWidgetLayer(this, new System.Windows.Interop.WindowInteropHelper(this).Handle);
+        PinBtn.Content = _cfg.WindowLayer switch { "desktop" => "▣", "top" => "◆", _ => "◇" };
+        PinBtn.ToolTip = "窗口位置：" + (_cfg.WindowLayer switch { "desktop" => "桌面小工具", "top" => "始终置顶", _ => "普通窗口" });
     }
 
     private void FilterBtn_Click(object s, RoutedEventArgs e)
@@ -461,12 +477,13 @@ public partial class MainWindow : Window
     {
         try
         {
-            var dlg = new SettingsDialog(_cfg) { Owner = this };
+            var draft = _cfg.Clone();
+            var dlg = new SettingsDialog(draft) { Owner = this };
             if (dlg.ShowDialog() == true)
             {
-                try { ConfigManager.Save(_cfg); } // 只在这里写一次盘
-                catch (Exception ex) { ShowError("保存配置", ex); }
-                await ApplySettingsAsync(); // 即使写盘失败，设置也应立即生效
+                IsEnabled = false;
+                try { await ApplySettingsAsync(draft); }
+                finally { IsEnabled = true; }
             }
         }
         catch (Exception ex) { ShowError("保存设置", ex); }
@@ -589,7 +606,7 @@ public partial class MainWindow : Window
         _cfg.CardPositionY = (int)Top;
         _cfg.CardWidth = (int)Width;
         _cfg.CardHeight = (int)Height;
-        try { ConfigManager.Save(_cfg); }
+        try { ConfigManager.SavePreferences(_cfg); }
         catch { /* 退出时不因写配置失败而阻断 */ }
     }
 
@@ -662,14 +679,31 @@ public partial class MainWindow : Window
 
     private void TitleLabel_RightClick(object sender, MouseButtonEventArgs e)
     {
-        var menu = new ContextMenu();
-        foreach (var name in Themes.Keys)
+        OpenSkinMenu();
+        e.Handled = true;
+    }
+
+    private void SkinButton_Click(object sender, RoutedEventArgs e) => OpenSkinMenu();
+
+    private void OpenSkinMenu()
+    {
+        var picker = new SkinPicker(_cfg, () => ApplyTheme(_cfg.Theme));
+        var menu = new System.Windows.Controls.Primitives.Popup
         {
-            var item = new MenuItem { Header = (name == _cfg.Theme ? "● " : "    ") + name };
-            item.Click += (_, _) => { ApplyTheme(name); ConfigManager.Save(_cfg); };
-            menu.Items.Add(item);
-        }
+            PlacementTarget = SkinButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+            Child = picker, StaysOpen = false, AllowsTransparency = true,
+            PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.Fade
+        };
+        picker.PreviewKeyDown += (_, args) => { if (args.Key == Key.Escape) menu.IsOpen = false; };
+        picker.ColorDialogOpen += open => menu.StaysOpen = open;
+        menu.Closed += (_, _) =>
+        {
+            if (!picker.Changed) return;
+            try { ConfigManager.SavePreferences(_cfg); }
+            catch (Exception ex) { StatusLabel.Text = "皮肤已切换，但未保存：" + ex.Message; }
+        };
         menu.IsOpen = true;
+        picker.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
     }
 
     private void ShowError(string action, Exception ex)
@@ -737,7 +771,7 @@ public class SettingsDialog : Window
     private readonly TextBox _urlBox, _userBox, _calBox, _thumbBox, _intervalBox, _proxyBox;
     private readonly PasswordBox _pwdBox;
     private readonly CheckBox _autoStartChk;
-    private readonly ComboBox _themeCb;
+    private readonly CheckBox _localMode;
     private readonly TextBlock _result;
     private readonly Button _testBtn;
 
@@ -750,7 +784,13 @@ public class SettingsDialog : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         WindowStyle = WindowStyle.ToolWindow; ResizeMode = ResizeMode.NoResize;
 
-        var sp = new StackPanel { Margin = new Thickness(14) };
+        var settingsPanel = new StackPanel { Margin = new Thickness(14) };
+        _localMode = new CheckBox { Content = "仅在本机记录任务", IsChecked = cfg.UsesLocalStore,
+            Margin = new Thickness(0, 0, 0, 10) };
+        settingsPanel.Children.Add(_localMode);
+        var cloudFields = new StackPanel();
+        settingsPanel.Children.Add(cloudFields);
+        var sp = cloudFields;
         sp.Children.Add(MakeLabel("Nextcloud URL:"));
         _urlBox = MakeTextBox(_draft.NextcloudUrl); sp.Children.Add(_urlBox);
         sp.Children.Add(MakeLabel("用户名:"));
@@ -763,10 +803,7 @@ public class SettingsDialog : Window
         _intervalBox = MakeTextBox(_draft.SyncIntervalSeconds.ToString()); sp.Children.Add(_intervalBox);
         sp.Children.Add(MakeLabel("自签证书 SHA-256 指纹（可选，留空 = 严格校验证书）:"));
         _thumbBox = MakeTextBox(_draft.CertificateThumbprint); sp.Children.Add(_thumbBox);
-        sp.Children.Add(MakeLabel("主题:"));
-        _themeCb = new ComboBox { ItemsSource = new[] { "暗黑", "亮白", "深蓝", "墨绿", "暗紫" } };
-        _themeCb.SelectedItem = _draft.Theme;
-        sp.Children.Add(_themeCb);
+        sp = settingsPanel;
         _autoStartChk = new CheckBox { Content = "开机自启", IsChecked = _draft.AutoStart };
         sp.Children.Add(_autoStartChk);
         sp.Children.Add(MakeLabel("代理地址（用于更新检查，留空 = 走系统代理）:"));
@@ -789,6 +826,15 @@ public class SettingsDialog : Window
             MinHeight = 40,
         };
         sp.Children.Add(_result);
+        void UpdateMode()
+        {
+            bool local = _localMode.IsChecked == true;
+            cloudFields.Visibility = testRow.Visibility = local ? Visibility.Collapsed : Visibility.Visible;
+            _result.Text = local ? "任务保存在此 Windows 用户的本机清单。切换到 Nextcloud 后仍可切回查看。" :
+                "填写 Nextcloud 连接信息；保存前可先测试连接。";
+        }
+        _localMode.Click += (_, _) => UpdateMode();
+        UpdateMode();
 
         var btnRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
         var ok = new Button { Content = "保存", Width = 80, Margin = new Thickness(0, 0, 8, 0) };
@@ -806,13 +852,13 @@ public class SettingsDialog : Window
 
     private AppConfig Collect()
     {
+        _draft.LocalOnly = _localMode.IsChecked == true;
         _draft.NextcloudUrl = _urlBox.Text.Trim();
         _draft.Username = _userBox.Text.Trim();
         _draft.AppPassword = _pwdBox.Password;
         _draft.CalendarName = _calBox.Text.Trim();
         _draft.CertificateThumbprint = _thumbBox.Text.Trim();
         _draft.SyncIntervalSeconds = int.TryParse(_intervalBox.Text.Trim(), out var n) ? n : 300;
-        _draft.Theme = _themeCb.SelectedItem?.ToString() ?? "暗黑";
         _draft.AutoStart = _autoStartChk.IsChecked ?? false;
         _draft.ProxyUrl = _proxyBox.Text.Trim();
         return _draft;
@@ -853,7 +899,7 @@ public class SettingsDialog : Window
     private void Save()
     {
         var draft = Collect();
-        var error = ConfigManager.ValidateForConnection(draft);
+        var error = draft.UsesLocalStore ? null : ConfigManager.ValidateForConnection(draft);
         if (error != null)
         {
             if (error.StartsWith("警告", StringComparison.Ordinal))
@@ -882,13 +928,13 @@ public class SettingsDialog : Window
 
     private static void CopyTo(AppConfig from, AppConfig to)
     {
+        to.LocalOnly = from.LocalOnly;
         to.NextcloudUrl = from.NextcloudUrl;
         to.Username = from.Username;
         to.AppPassword = from.AppPassword;
         to.CalendarName = from.CalendarName;
         to.CertificateThumbprint = from.CertificateThumbprint;
         to.SyncIntervalSeconds = from.SyncIntervalSeconds;
-        to.Theme = from.Theme;
         to.AutoStart = from.AutoStart;
         to.ProxyUrl = from.ProxyUrl;
         to.AllowInsecureHttp = from.AllowInsecureHttp;
